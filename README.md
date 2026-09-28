@@ -1,6 +1,6 @@
 # Stairs Arp
 
-A CLAP (and VST3) note-effect arpeggiator with Omnisphere 3's note patterns, Stairs included, built on
+A CLAP note-effect arpeggiator with Omnisphere 3's note patterns, Stairs included, built on
 [nice-plug](https://codeberg.org/RustAudio/nice-plug) 0.4.2 (pinned exactly in `Cargo.toml`).
 It has no GUI; every setting is a plain parameter, so Bitwig shows them as device parameters.
 
@@ -8,7 +8,7 @@ It has no GUI; every setting is a plain parameter, so Bitwig shows them as devic
 
 ```shell
 cargo test                               # pattern, engine and timing tests
-cargo xtask bundle stairs_arp --release  # -> target/bundled/Stairs Arp.{clap,vst3}
+cargo xtask bundle stairs_arp --release  # -> target/bundled/Stairs Arp.clap
 ```
 
 Copy `target/bundled/Stairs Arp.clap` to `~/Library/Audio/Plug-Ins/CLAP/`, or add
@@ -120,5 +120,3 @@ octaves 1–3.
 - `SAMPLE_ACCURATE_AUTOMATION` stays off. With it on, nice-plug 0.4.2's CLAP wrapper adds the
   sub-block offset to the song position even when the split came from a transport event whose
   position is already current. That would shift the grid.
-- VST3 has no note-effect category. The plugin uses `Instrument|Tools`, as nice-plug's
-  `midi_inverter` example does. VST3 in Bitwig is untested.

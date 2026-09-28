@@ -268,12 +268,4 @@ impl ClapPlugin for StairsArp {
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::NoteEffect];
 }
 
-impl Vst3Plugin for StairsArp {
-    const VST3_CLASS_ID: [u8; 16] = *b"StairsArpeggiat0";
-    // VST3 has no note-effect category; this matches nice-plug's midi_inverter example.
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
-        &[Vst3SubCategory::Instrument, Vst3SubCategory::Tools];
-}
-
 nice_export_clap!(StairsArp);
-nice_export_vst3!(StairsArp);
