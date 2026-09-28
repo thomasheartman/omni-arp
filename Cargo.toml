@@ -1,0 +1,21 @@
+[package]
+name = "stairs_arp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned exactly: nice-plug is experimental and its API moves between minor versions.
+nice-plug = { version = "=0.4.2", default-features = false, features = ["vst3", "assert_process_allocs"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
