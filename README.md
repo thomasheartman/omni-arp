@@ -1,7 +1,7 @@
 # omni-arp
 
 A CLAP note-effect arpeggiator that builds patterns from a few knobs: a shape (straight, stairs,
-climb), a direction, where the walk starts, what it does at the edge, and an optional second
+groups of three), a direction, where the walk starts, what it does at the edge, and an optional second
 walker or pedal note. Built on [nice-plug](https://codeberg.org/RustAudio/nice-plug) 0.4.2
 (pinned exactly in `Cargo.toml`). It has no GUI; every setting is a plain parameter, so Bitwig
 shows them as device parameters.
@@ -29,7 +29,7 @@ allocates.
 
 | Parameter        | Values                                                         | Default   |
 | ---------------- | -------------------------------------------------------------- | --------- |
-| Shape            | Straight (+1), Stairs (+2 -1), Climb (+1 +1 -1), Repeat x2, Repeat x4 | Stairs |
+| Shape            | Straight (+1), Stairs (+2 -1), Groups of Three (+1 +1 -1), Repeat x2, Repeat x4 | Stairs |
 | Direction        | Up, Down                                                       | Up        |
 | Start            | Outside, Middle                                                | Outside   |
 | Edge             | Restart, Reverse, Wrap                                         | Restart   |
@@ -61,7 +61,7 @@ Straight Up, Edge Reverse             1 2 3 4 5 6 5 4 3 2
 Straight Up, Start Middle             4 5 6                    Restart plays one half
 Straight Up, Start Middle, Edge Wrap  4 5 6 1 2 3
 Stairs Up (5 notes)                   1 3 2 4 3 5 4
-Climb Up (5 notes)                    1 2 3 2 3 4 3 4 5 4 5
+Groups of Three (5 notes)             1 2 3 2 3 4 3 4 5 4 5
 Pair Mirror                           1 6 2 5 3 4              Join
 Pair Mirror, Down, Start Middle       3 4 2 5 1 6              Spread
 Pair Mirror, Edge Reverse             1 6 2 5 3 4 2 5          Join/Spread
@@ -69,9 +69,9 @@ Pair Low (5 notes)                    1 2 1 3 1 4 1 5
 Pair High, Down (5 notes)             5 4 5 3 5 2 5 1
 ```
 
-- **Shape** is how the walk moves from each position: Stairs goes two up and one down, Climb
-  plays three in a row and moves up one. The Repeat shapes walk straight and play each note two
-  or four times.
+- **Shape** is how the walk moves from each position: Stairs goes two up and one down, Groups
+  of Three plays three in a row and moves up one. The Repeat shapes walk straight and play each
+  note two or four times.
 - **Direction** Down mirrors the walk top to bottom.
 - **Start** Outside begins at the end opposite the direction. Middle begins at the middle note
   on the side the walk is heading: the upper middle going up, the lower middle going down.
@@ -127,12 +127,12 @@ then `E` over `G C`, then `G` over `C E`: the three inversions.
 
 - **Overshoot ends the pass.** A walk stops before the first note that would leave the range,
   then follows the Edge setting. It never clamps or skips. The top note is still reached.
-- **Fewer than 3 notes.** Stairs and Climb need three notes to take their steps, and walk
+- **Fewer than 3 notes.** Stairs and Groups of Three need three notes to take their steps, and walk
   straight over fewer. A single note just repeats, and so does a Middle + Restart half of two.
 - **Turnarounds.** When Reverse would play a step twice in a row where the walk turns, or where
   the cycle loops, the step plays once. Repeat Ends keeps both. A step is a note, or with Pair
   Mirror a round of both walkers, so Join/Spread plays the middle and outer pairs once per
-  cycle. Stairs and Climb never turn on the same note.
+  cycle. Stairs and Groups of Three never turn on the same note.
 - **Mirror.** The two halves share the middle note when the count is odd, and a note that would
   play twice in a row plays once. The walkers can't pass each other, so Wrap acts as Restart.
 - **Low and High.** The pedal note is left out of the walk and plays first.

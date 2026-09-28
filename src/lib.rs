@@ -365,7 +365,7 @@ impl Plugin for StairsArp {
 impl ClapPlugin for StairsArp {
     const CLAP_ID: &'static str = "com.thomasheartman.omni-arp";
     const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("Arpeggiator built from stairs, climbs, mirrored walks and pedal notes");
+        Some("Arpeggiator built from stairs, groups of three, mirrored walks and pedal notes");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::NoteEffect];

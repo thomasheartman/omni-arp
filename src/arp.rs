@@ -972,7 +972,7 @@ mod tests {
         for shape in [
             Shape::Straight,
             Shape::Stairs,
-            Shape::Climb,
+            Shape::GroupsOfThree,
             Shape::RepeatX4,
         ] {
             for edge in [Edge::Restart, Edge::Reverse, Edge::Wrap] {

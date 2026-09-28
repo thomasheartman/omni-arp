@@ -13,8 +13,9 @@ pub enum Shape {
     Straight,
     #[id = "stairs"]
     Stairs,
-    #[id = "climb"]
-    Climb,
+    #[id = "groups-of-three"]
+    #[name = "Groups of Three"]
+    GroupsOfThree,
     #[id = "repeat-x2"]
     #[name = "Repeat x2"]
     RepeatX2,
@@ -25,11 +26,11 @@ pub enum Shape {
 
 impl Shape {
     /// Notes played from each position before a walk over `m` notes moves on by one: Stairs is
-    /// `+2 -1`, Climb `+1 +1 -1`. Both need three notes, and walk straight over fewer.
+    /// `+2 -1`, Groups of Three `+1 +1 -1`. Both need three notes, and walk straight over fewer.
     fn chunk(self, m: usize) -> &'static [usize] {
         match self {
             Shape::Stairs if m >= 3 => &[0, 2],
-            Shape::Climb if m >= 3 => &[0, 1, 2],
+            Shape::GroupsOfThree if m >= 3 => &[0, 1, 2],
             _ => &[0],
         }
     }
@@ -341,7 +342,7 @@ mod tests {
     const SHAPES: [Shape; 5] = [
         Shape::Straight,
         Shape::Stairs,
-        Shape::Climb,
+        Shape::GroupsOfThree,
         Shape::RepeatX2,
         Shape::RepeatX4,
     ];
@@ -461,17 +462,17 @@ mod tests {
             ),
             (spec(Stairs, Up, Outside, Restart, Off), 2, &[0, 1]),
             (
-                spec(Climb, Up, Outside, Restart, Off),
+                spec(GroupsOfThree, Up, Outside, Restart, Off),
                 5,
                 &[0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4],
             ),
             (
-                spec(Climb, Down, Outside, Restart, Off),
+                spec(GroupsOfThree, Down, Outside, Restart, Off),
                 5,
                 &[4, 3, 2, 3, 2, 1, 2, 1, 0, 1, 0],
             ),
             (
-                spec(Climb, Up, Outside, Reverse, Off),
+                spec(GroupsOfThree, Up, Outside, Reverse, Off),
                 3,
                 &[0, 1, 2, 1, 2, 1, 0, 1],
             ),
@@ -555,7 +556,7 @@ mod tests {
             (spec(Straight, Up, Outside, Restart, Low), 1, &[0]),
             // A single note just repeats.
             (spec(Stairs, Up, Outside, Reverse, Mirror), 1, &[0]),
-            (spec(Climb, Down, Middle, Wrap, Off), 1, &[0]),
+            (spec(GroupsOfThree, Down, Middle, Wrap, Off), 1, &[0]),
             // Mirrored stairs, each walker in its half: 0 2 1 below, 5 3 4 above.
             (
                 spec(Stairs, Up, Outside, Restart, Mirror),
