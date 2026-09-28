@@ -37,7 +37,7 @@ pub struct Settings {
     pub length: usize,
     /// Notes per step: the pattern's note on top, then the next held notes below it.
     pub notes: usize,
-    /// Velocity of the notes below the top one, as a fraction of what they'd otherwise play.
+    /// Velocity of the notes below the top one, as a fraction of the top note's.
     pub chord_velocity: f32,
     /// Note length as a fraction of the step, in `[0, 2]`.
     pub note_length: f64,
@@ -279,6 +279,10 @@ impl Arp {
             }
             key
         };
+        let velocity = match s.velocity {
+            Velocity::AsPlayed => trigger_velocity.unwrap_or(lead.velocity),
+            Velocity::Fixed(velocity) => velocity,
+        };
         let mut ceiling = top + 1;
         for voice in 0..s.notes.min(n) {
             let Some((key, note)) = pool
@@ -292,11 +296,7 @@ impl Arp {
             ceiling = key;
             // Octaves past either end of the MIDI range are rests.
             if (0..MAX_KEYS as i32).contains(&key) {
-                let velocity = match s.velocity {
-                    Velocity::AsPlayed => trigger_velocity.unwrap_or(note.velocity),
-                    Velocity::Fixed(velocity) => velocity,
-                };
-                // The top note is the accent.
+                // The top note is the accent; the rest follow it, whatever their own velocity.
                 let velocity = if voice == 0 {
                     velocity
                 } else {
@@ -748,7 +748,19 @@ mod tests {
             ..settings(Shape::Straight)
         };
         let mut arp = Arp::default();
-        hold(&mut arp, &[60, 64, 67]);
+        // Softer on top than below: the lower notes follow the top note, not their own velocity.
+        arp.key_on(Note {
+            velocity: 0.8,
+            ..note(60)
+        });
+        arp.key_on(Note {
+            velocity: 1.0,
+            ..note(64)
+        });
+        arp.key_on(Note {
+            velocity: 0.2,
+            ..note(67)
+        });
         let velocities: Vec<(u8, f32)> = run(&mut arp, &s, 0, 1, true)
             .into_iter()
             .filter_map(|(_, o)| match o {

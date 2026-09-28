@@ -40,7 +40,7 @@ allocates.
 | Rate             | 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32                              | 1/16      |
 | **Notes**        |                                                                |           |
 | Notes            | 1, 2, 3, All: the pattern's note on top, plus the next held notes below it | 1 |
-| Chord Velocity   | 1–100 %: velocity of the notes below the top one               | 80 %      |
+| Chord Velocity   | 1–100 % of the top note's velocity, for the notes below it     | 80 %      |
 | Note Length      | 0–200 % of the step                                            | 100 %     |
 | Octaves Down     | 0–3                                                            | 0         |
 | Octaves Up       | 0–3                                                            | 0         |
@@ -126,7 +126,8 @@ Each step can play more than the pattern's note. The pattern's note goes on top.
 note moves into its octave and then drops by octaves until it's below it, and the next highest
 of those fill in. With C E G held and Notes set to All, the steps play `C` over `E G` below it,
 then `E` over `G C`, then `G` over `C E`: the three inversions. Chord Velocity accents the top
-note by playing the others quieter, at 80 % of their usual velocity by default.
+note by playing the others quieter, at 80 % of the top note's velocity by default, however hard
+their own keys were pressed.
 
 ## Edge-case decisions
 
