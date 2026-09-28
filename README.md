@@ -1,4 +1,4 @@
-# Stairs Arp
+# omni-arp
 
 A CLAP note-effect arpeggiator with Omnisphere 3's note patterns, Stairs included, built on
 [nice-plug](https://codeberg.org/RustAudio/nice-plug) 0.4.2 (pinned exactly in `Cargo.toml`).
@@ -8,12 +8,20 @@ It has no GUI; every setting is a plain parameter, so Bitwig shows them as devic
 
 ```shell
 cargo test                               # pattern, engine and timing tests
-cargo xtask bundle stairs_arp --release  # -> target/bundled/Stairs Arp.clap
+cargo xtask bundle omni-arp --release    # -> target/bundled/omni-arp.clap
 ```
 
-Copy `target/bundled/Stairs Arp.clap` to `~/Library/Audio/Plug-Ins/CLAP/`, or add
-`target/bundled` to Bitwig's plugin locations. Put it before an instrument in the device chain.
-A debug bundle (`cargo xtask bundle stairs_arp`) aborts if `process()` ever allocates.
+Install by copying the bundle to the user CLAP folder, which Bitwig scans by default:
+
+```shell
+mkdir -p ~/Library/Audio/Plug-Ins/CLAP
+rm -rf ~/Library/Audio/Plug-Ins/CLAP/omni-arp.clap
+cp -R target/bundled/omni-arp.clap ~/Library/Audio/Plug-Ins/CLAP/
+```
+
+Then restart Bitwig (or rescan plug-ins in its settings) and put omni-arp before an instrument
+in the device chain. A debug bundle (`cargo xtask bundle omni-arp`) aborts if `process()` ever
+allocates.
 
 ## Parameters
 
@@ -115,7 +123,7 @@ octaves 1–3.
   [clap-validator](https://github.com/free-audio/clap-validator) 0.4.1 (36 passed, 0 failed; the
   8 skipped tests cover audio ports and presets). It hasn't been tried in Bitwig yet.
 - The bundler signs ad hoc. That's fine for local use; sharing the plugin needs Developer ID
-  signing and notarization. For Intel Macs, `cargo xtask bundle-universal stairs_arp --release`
+  signing and notarization. For Intel Macs, `cargo xtask bundle-universal omni-arp --release`
   should build a universal binary (needs `rustup target add x86_64-apple-darwin`; untested).
 - `SAMPLE_ACCURATE_AUTOMATION` stays off. With it on, nice-plug 0.4.2's CLAP wrapper adds the
   sub-block offset to the song position even when the split came from a transport event whose
