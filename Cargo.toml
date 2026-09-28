@@ -15,6 +15,10 @@ crate-type = ["cdylib"]
 # Pinned exactly: nice-plug is experimental and its API moves between minor versions.
 nice-plug = { version = "=0.4.2", default-features = false, features = ["vst3", "assert_process_allocs"] }
 
+[dev-dependencies]
+# Already pulled in by `assert_process_allocs`; the tests call it directly.
+nice-assert-no-alloc = "=1.0.0"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

@@ -5,8 +5,12 @@
 // The derive is the only link to the plugin framework; `fill` itself is plain Rust.
 use nice_plug::prelude::Enum;
 
+/// Omnisphere 3's note patterns, in its menu order. Up/Down+ and Down/Up+ are Up/Down and Down/Up
+/// with `repeat_ends` on.
 #[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    #[id = "chord"]
+    Chord,
     #[id = "up"]
     Up,
     #[id = "down"]
@@ -17,6 +21,27 @@ pub enum Mode {
     #[id = "down-up"]
     #[name = "Down/Up"]
     DownUp,
+    #[id = "random"]
+    Random,
+    #[id = "as-played"]
+    #[name = "As Played"]
+    AsPlayed,
+    #[id = "repeat-x2"]
+    #[name = "Repeat X2"]
+    RepeatX2,
+    #[id = "repeat-x4"]
+    #[name = "Repeat X4"]
+    RepeatX4,
+    #[id = "join"]
+    Join,
+    #[id = "spread"]
+    Spread,
+    #[id = "join-spread"]
+    #[name = "Join/Spread"]
+    JoinSpread,
+    #[id = "spread-join"]
+    #[name = "Spread/Join"]
+    SpreadJoin,
     #[id = "stairs-up"]
     #[name = "Stairs Up"]
     StairsUp,
@@ -39,10 +64,13 @@ pub const fn max_len(m: usize) -> usize {
 /// Replaces `out` with one cycle of `mode` over `0..m`. Doesn't allocate as long as
 /// `out.capacity() >= max_len(m)`.
 ///
+/// Chord, Random and As Played are plain Up here. The engine gives them their meaning: Chord walks
+/// octaves and plays the whole pool at each step, Random reshuffles every cycle with [`shuffle`],
+/// and As Played orders the pool by key press instead of pitch.
+///
 /// Stairs walks go +2, -1 from the bottom (`0, 2, 1, 3, 2, 4, ...`) and the cycle ends at the
 /// first step that would leave `0..m`. A stair needs at least three indices to take its +2 step,
-/// so with fewer the Stairs modes play their plain counterparts. `repeat_ends` only affects
-/// Up/Down and Down/Up: it plays the top and bottom notes twice at the turnarounds.
+/// so with fewer the Stairs modes play their plain counterparts.
 pub fn fill(out: &mut Vec<usize>, mode: Mode, m: usize, repeat_ends: bool) {
     out.clear();
     if m == 0 {
@@ -57,32 +85,81 @@ pub fn fill(out: &mut Vec<usize>, mode: Mode, m: usize, repeat_ends: bool) {
         mode => mode,
     };
     match mode {
-        Mode::Up => out.extend(0..m),
-        Mode::Down => out.extend((0..m).rev()),
-        Mode::UpDown => up_down(out, m, repeat_ends),
-        Mode::DownUp => {
-            up_down(out, m, repeat_ends);
-            mirror(out, m);
-        }
+        Mode::Chord | Mode::Up | Mode::Random | Mode::AsPlayed => up(out, m),
+        Mode::Down => down(out, m),
+        Mode::UpDown => both(out, m, repeat_ends, up, down),
+        Mode::DownUp => both(out, m, repeat_ends, down, up),
+        Mode::RepeatX2 => out.extend((0..m).flat_map(|i| std::iter::repeat_n(i, 2))),
+        Mode::RepeatX4 => out.extend((0..m).flat_map(|i| std::iter::repeat_n(i, 4))),
+        Mode::Join => join(out, m),
+        Mode::Spread => spread(out, m),
+        Mode::JoinSpread => both(out, m, repeat_ends, join, spread),
+        Mode::SpreadJoin => both(out, m, repeat_ends, spread, join),
         Mode::StairsUp => stairs_up(out, m),
-        Mode::StairsDown => {
-            stairs_up(out, m);
-            mirror(out, m);
+        Mode::StairsDown => stairs_down(out, m),
+        Mode::StairsUpDown => both(out, m, repeat_ends, stairs_up, stairs_down),
+        Mode::StairsDownUp => both(out, m, repeat_ends, stairs_down, stairs_up),
+    }
+}
+
+/// Shuffles `indices` in place with the xorshift64 generator in `state`, which must not be zero.
+/// Swaps the first two if the shuffle would start on `previous`, so a new cycle doesn't repeat the
+/// note that ended the last one.
+pub fn shuffle(indices: &mut [usize], state: &mut u64, previous: usize) {
+    for i in (1..indices.len()).rev() {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        indices.swap(i, (*state % (i as u64 + 1)) as usize);
+    }
+    if indices.len() > 1 && indices[0] == previous {
+        indices.swap(0, 1);
+    }
+}
+
+type Walk = fn(&mut Vec<usize>, usize);
+
+/// Plays `first`, then `second`. Where the two halves meet, and where the cycle loops, a note that
+/// would play twice in a row plays once unless `repeat_ends` is on.
+fn both(out: &mut Vec<usize>, m: usize, repeat_ends: bool, first: Walk, second: Walk) {
+    first(out, m);
+    let seam = out.len();
+    second(out, m);
+    if !repeat_ends {
+        if out[seam] == out[seam - 1] {
+            out.remove(seam);
         }
-        Mode::StairsUpDown => stairs_up_down(out, m),
-        Mode::StairsDownUp => {
-            stairs_up_down(out, m);
-            mirror(out, m);
+        if out.len() > 1 && out.first() == out.last() {
+            out.pop();
         }
     }
 }
 
-fn up_down(out: &mut Vec<usize>, m: usize, repeat_ends: bool) {
+fn up(out: &mut Vec<usize>, m: usize) {
     out.extend(0..m);
-    if repeat_ends {
-        out.extend((0..m).rev());
-    } else {
-        out.extend((1..m - 1).rev());
+}
+
+fn down(out: &mut Vec<usize>, m: usize) {
+    out.extend((0..m).rev());
+}
+
+/// Outside in: lowest, highest, second lowest, second highest, and so on.
+fn join(out: &mut Vec<usize>, m: usize) {
+    for j in 0..m / 2 {
+        out.extend([j, m - 1 - j]);
+    }
+    if m % 2 == 1 {
+        out.push(m / 2);
+    }
+}
+
+/// Inside out: Join's pairs in reverse order, each still low then high. An odd middle goes first.
+fn spread(out: &mut Vec<usize>, m: usize) {
+    if m % 2 == 1 {
+        out.push(m / 2);
+    }
+    for j in (0..m / 2).rev() {
+        out.extend([j, m - 1 - j]);
     }
 }
 
@@ -94,13 +171,10 @@ fn stairs_up(out: &mut Vec<usize>, m: usize) {
     out.push(m - 2);
 }
 
-/// Stairs Up ends on `m - 2` and Stairs Down starts on `m - 1` (and ends on 1 before looping to
-/// 0), so neither seam repeats a note.
-fn stairs_up_down(out: &mut Vec<usize>, m: usize) {
+fn stairs_down(out: &mut Vec<usize>, m: usize) {
+    let start = out.len();
     stairs_up(out, m);
-    let half = out.len();
-    out.extend_from_within(..);
-    mirror(&mut out[half..], m);
+    mirror(&mut out[start..], m);
 }
 
 /// Reflects indices top to bottom, turning an upward walk into its downward twin.
@@ -114,11 +188,20 @@ fn mirror(indices: &mut [usize], m: usize) {
 mod tests {
     use super::*;
 
-    const MODES: [Mode; 8] = [
+    const MODES: [Mode; 17] = [
+        Mode::Chord,
         Mode::Up,
         Mode::Down,
         Mode::UpDown,
         Mode::DownUp,
+        Mode::Random,
+        Mode::AsPlayed,
+        Mode::RepeatX2,
+        Mode::RepeatX4,
+        Mode::Join,
+        Mode::Spread,
+        Mode::JoinSpread,
+        Mode::SpreadJoin,
         Mode::StairsUp,
         Mode::StairsDown,
         Mode::StairsUpDown,
@@ -141,6 +224,19 @@ mod tests {
             (UpDown, 4, true, &[0, 1, 2, 3, 3, 2, 1, 0]),
             (DownUp, 4, false, &[3, 2, 1, 0, 1, 2]),
             (DownUp, 4, true, &[3, 2, 1, 0, 0, 1, 2, 3]),
+            (RepeatX2, 3, false, &[0, 0, 1, 1, 2, 2]),
+            (RepeatX4, 2, false, &[0, 0, 0, 0, 1, 1, 1, 1]),
+            // The manual's six-note examples: 1-6-2-5-3-4 and 3-4-2-5-1-6.
+            (Join, 6, false, &[0, 5, 1, 4, 2, 3]),
+            (Spread, 6, false, &[2, 3, 1, 4, 0, 5]),
+            (Join, 5, false, &[0, 4, 1, 3, 2]),
+            (Spread, 5, false, &[2, 1, 3, 0, 4]),
+            (JoinSpread, 6, false, &[0, 5, 1, 4, 2, 3, 2, 3, 1, 4, 0, 5]),
+            (SpreadJoin, 6, false, &[2, 3, 1, 4, 0, 5, 0, 5, 1, 4, 2, 3]),
+            // An odd middle would play twice where Join and Spread meet.
+            (JoinSpread, 5, false, &[0, 4, 1, 3, 2, 1, 3, 0, 4]),
+            (JoinSpread, 5, true, &[0, 4, 1, 3, 2, 2, 1, 3, 0, 4]),
+            (SpreadJoin, 5, false, &[2, 1, 3, 0, 4, 0, 4, 1, 3]),
             (StairsUp, 3, false, &[0, 2, 1]),
             (StairsUp, 5, false, &[0, 2, 1, 3, 2, 4, 3]),
             (StairsDown, 5, false, &[4, 2, 3, 1, 2, 0, 1]),
@@ -192,9 +288,12 @@ mod tests {
     }
 
     #[test]
-    fn no_note_plays_twice_in_a_row_unless_repeat_ends() {
+    fn no_note_plays_twice_in_a_row_unless_asked_to() {
         for m in 2..=18 {
             for mode in MODES {
+                if matches!(mode, Mode::RepeatX2 | Mode::RepeatX4) {
+                    continue;
+                }
                 let p = pattern(mode, m, 1, false);
                 // Includes the seam from the last step back to the first.
                 for (k, &i) in p.iter().enumerate() {
@@ -219,6 +318,29 @@ mod tests {
                     mirror(&mut mirrored, m);
                     assert_eq!(mirrored, pattern(down, m, 1, repeat_ends), "{up:?} m={m}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn shuffle_permutes_without_repeating_across_cycles() {
+        let mut state = 0x9e37_79b9_7f4a_7c15;
+        for m in 1..=18 {
+            let mut p = pattern(Mode::Random, m, 1, false);
+            let mut orders = std::collections::HashSet::new();
+            for _ in 0..50 {
+                let previous = *p.last().unwrap();
+                shuffle(&mut p, &mut state, previous);
+                let mut sorted = p.clone();
+                sorted.sort();
+                assert_eq!(sorted, (0..m).collect::<Vec<_>>(), "m={m}");
+                if m > 1 {
+                    assert_ne!(p[0], previous, "m={m}");
+                }
+                orders.insert(p.clone());
+            }
+            if m >= 3 {
+                assert!(orders.len() > 1, "m={m}: the order never changes");
             }
         }
     }

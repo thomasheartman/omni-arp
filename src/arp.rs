@@ -2,6 +2,7 @@
 //! plugin host; `lib.rs` feeds it key presses and a clock one sample at a time.
 
 use crate::pattern::{self, Mode};
+use std::hash::{BuildHasher, RandomState};
 
 pub const MAX_OCTAVES: usize = 4;
 const MAX_KEYS: usize = 128;
@@ -35,10 +36,14 @@ pub struct Settings {
 }
 
 pub struct Arp {
-    /// Keys currently held down, sorted by pitch.
+    /// Keys currently held down, in the order they were pressed.
     held: Vec<Note>,
-    /// Every key pressed since all keys were last up. This is the pool while latched.
+    /// Every key pressed since all keys were last up, in press order. This is the pool while
+    /// latched.
     latched: Vec<Note>,
+    /// The pool as the pattern indexes it: sorted by pitch, or in press order for As Played.
+    /// Rebuilt on every step.
+    view: Vec<Note>,
     pattern: Vec<usize>,
     /// The `(mode, m, repeat_ends)` that `pattern` was built for.
     built: Option<(Mode, usize, bool)>,
@@ -47,15 +52,17 @@ pub struct Arp {
     /// Whether the pool was non-empty on the previous tick.
     active: bool,
     chord_changed: bool,
-    /// `(key, channel)` of the note that is on. The arp is monophonic.
-    sounding: Option<(u8, u8)>,
-    /// Samples left until the sounding note's gate closes.
+    /// `(key, channel)` of every note that is on. Only Chord mode has more than one.
+    sounding: Vec<(u8, u8)>,
+    /// Samples left until the sounding notes' gate closes.
     off_in: u32,
     /// Step index seen on the previous tick. A step fires on the first tick where this changes.
     last_step: Option<i64>,
     /// Position of the free-running clock used while the transport is stopped.
     free_beat: f64,
     playing: bool,
+    /// Random mode's xorshift state. Never zero.
+    rng: u64,
 }
 
 impl Default for Arp {
@@ -63,16 +70,19 @@ impl Default for Arp {
         Self {
             held: Vec::with_capacity(MAX_KEYS),
             latched: Vec::with_capacity(MAX_KEYS),
+            view: Vec::with_capacity(MAX_KEYS),
             pattern: Vec::with_capacity(pattern::max_len(MAX_KEYS * MAX_OCTAVES)),
             built: None,
             pos: 0,
             active: false,
             chord_changed: false,
-            sounding: None,
+            sounding: Vec::with_capacity(MAX_KEYS),
             off_in: 0,
             last_step: None,
             free_beat: 0.0,
             playing: false,
+            // Seeded per instance, so two arps in Random mode don't play the same order.
+            rng: RandomState::new().hash_one(0) | 1,
         }
     }
 }
@@ -85,8 +95,8 @@ impl Arp {
         if self.held.is_empty() {
             self.latched.clear();
         }
-        insert(&mut self.held, note);
-        insert(&mut self.latched, note);
+        add(&mut self.held, note);
+        add(&mut self.latched, note);
         self.chord_changed = true;
     }
 
@@ -99,7 +109,7 @@ impl Arp {
         self.chord_changed |= !latch;
     }
 
-    /// Forgets all keys. The sounding note gets its note-off on the next tick, because the host
+    /// Forgets all keys. Sounding notes get their note-offs on the next tick, because the host
     /// gives no way to send events from outside of `process()`.
     pub fn reset(&mut self) {
         self.held.clear();
@@ -109,7 +119,7 @@ impl Arp {
     }
 
     pub fn is_idle(&self) -> bool {
-        !self.active && self.sounding.is_none()
+        !self.active && self.sounding.is_empty()
     }
 
     /// Advances one sample. `beat` is the song position at this sample while the transport is
@@ -123,7 +133,7 @@ impl Arp {
     ) {
         if beat.is_some() != self.playing {
             self.playing = beat.is_some();
-            self.end_note(emit);
+            self.end_notes(emit);
             self.pos = 0;
             self.free_beat = 0.0;
             // Pressing play fires the first step right away. Stopping waits out a step before
@@ -131,17 +141,17 @@ impl Arp {
             self.last_step = if self.playing { None } else { Some(0) };
         }
 
-        if self.sounding.is_some() {
+        if !self.sounding.is_empty() {
             self.off_in = self.off_in.saturating_sub(1);
             if self.off_in == 0 {
-                self.end_note(emit);
+                self.end_notes(emit);
             }
         }
 
         let n = self.pool(s.latch).len();
         let chord_changed = std::mem::take(&mut self.chord_changed);
         if n == 0 {
-            self.end_note(emit);
+            self.end_notes(emit);
             self.active = false;
         } else if !self.active {
             self.active = true;
@@ -164,49 +174,72 @@ impl Arp {
             return;
         }
 
-        let m = n * s.octaves;
-        if self.built != Some((s.mode, m, s.repeat_ends)) {
+        // Chord walks the octaves and plays the whole pool at each one.
+        let m = if s.mode == Mode::Chord {
+            s.octaves
+        } else {
+            n * s.octaves
+        };
+        let rebuilt = self.built != Some((s.mode, m, s.repeat_ends));
+        if rebuilt {
             pattern::fill(&mut self.pattern, s.mode, m, s.repeat_ends);
             self.built = Some((s.mode, m, s.repeat_ends));
             // Continue from the same step if the new pattern is long enough, else its last step.
             self.pos = self.pos.min(self.pattern.len() - 1);
         }
+        if s.mode == Mode::Random && (rebuilt || self.pos == 0) {
+            let previous = self.pattern[self.pattern.len() - 1];
+            pattern::shuffle(&mut self.pattern, &mut self.rng, previous);
+        }
         let i = self.pattern[self.pos];
         self.pos = (self.pos + 1) % self.pattern.len();
 
-        self.end_note(emit);
-        let note = self.pool(s.latch)[i % n];
-        let key = note.key as usize + 12 * (i / n);
-        // Octaves past the top of the MIDI range are rests.
-        if key < MAX_KEYS {
-            let key = key as u8;
-            emit(Out::On(Note {
-                key,
-                channel: note.channel,
-                velocity: s.velocity.unwrap_or(note.velocity),
-            }));
-            self.sounding = Some((key, note.channel));
-            self.off_in = gate_samples(s.gate, s.step_beats, beats_per_sample);
+        self.end_notes(emit);
+        self.view.clear();
+        self.view
+            .extend_from_slice(if s.latch { &self.latched } else { &self.held });
+        if s.mode != Mode::AsPlayed {
+            // Unstable sorts never allocate. Keys are unique, so the order is the same.
+            self.view.sort_unstable_by_key(|n| n.key);
         }
+        let (notes, octave) = if s.mode == Mode::Chord {
+            (&self.view[..], i)
+        } else {
+            (&self.view[i % n..=i % n], i / n)
+        };
+        for note in notes {
+            let key = note.key as usize + 12 * octave;
+            // Octaves past the top of the MIDI range are rests.
+            if key < MAX_KEYS {
+                emit(Out::On(Note {
+                    key: key as u8,
+                    channel: note.channel,
+                    velocity: s.velocity.unwrap_or(note.velocity),
+                }));
+                self.sounding.push((key as u8, note.channel));
+            }
+        }
+        self.off_in = gate_samples(s.gate, s.step_beats, beats_per_sample);
     }
 
     fn pool(&self, latch: bool) -> &[Note] {
         if latch { &self.latched } else { &self.held }
     }
 
-    fn end_note(&mut self, emit: &mut impl FnMut(Out)) {
-        if let Some((key, channel)) = self.sounding.take() {
+    fn end_notes(&mut self, emit: &mut impl FnMut(Out)) {
+        for (key, channel) in self.sounding.drain(..) {
             emit(Out::Off { key, channel });
         }
     }
 }
 
-/// Keeps `pool` sorted by key with one entry per key. Never grows past `MAX_KEYS` entries, so it
-/// never reallocates.
-fn insert(pool: &mut Vec<Note>, note: Note) {
-    match pool.binary_search_by_key(&note.key, |n| n.key) {
-        Ok(i) => pool[i] = note,
-        Err(i) => pool.insert(i, note),
+/// Appends `note`, or updates it in place if its key is already in `pool`, so the pool stays in
+/// press order with one entry per key. It never grows past `MAX_KEYS` entries, so it never
+/// reallocates.
+fn add(pool: &mut Vec<Note>, note: Note) {
+    match pool.iter_mut().find(|n| n.key == note.key) {
+        Some(n) => *n = note,
+        None => pool.push(note),
     }
 }
 
@@ -299,21 +332,29 @@ mod tests {
             .collect()
     }
 
-    /// Every note-on is followed by its note-off before the next note-on, and nothing is left on.
+    /// Every note from a step ends before the next step's notes start, and every note-off matches
+    /// a sounding note.
     fn assert_no_overlap(events: &[(u64, Out)]) {
-        let mut on = None;
+        let mut on: Vec<(u64, u8)> = Vec::new();
         for &(t, o) in events {
             match o {
                 Out::On(n) => {
-                    assert_eq!(on, None, "note-on at {t} while {on:?} is still on");
-                    on = Some(n.key);
+                    assert!(
+                        on.iter().all(|&(start, key)| start == t && key != n.key),
+                        "note-on at {t} while {on:?} are still on"
+                    );
+                    on.push((t, n.key));
                 }
                 Out::Off { key, .. } => {
-                    assert_eq!(on, Some(key), "stray note-off at {t}");
-                    on = None;
+                    let i = on.iter().position(|&(_, k)| k == key);
+                    on.remove(i.unwrap_or_else(|| panic!("stray note-off at {t}")));
                 }
             }
         }
+    }
+
+    fn keys(events: &[(u64, Out)]) -> Vec<u8> {
+        ons(events).iter().map(|&(_, k)| k).collect()
     }
 
     #[test]
@@ -567,6 +608,130 @@ mod tests {
         let events = run(&mut arp, &settings(Mode::Up), 5 * STEP, 6 * STEP, true);
         assert!(ons(&events).is_empty());
         assert!(arp.is_idle());
+    }
+
+    #[test]
+    fn chord_plays_the_pool_together_and_walks_octaves() {
+        let s = Settings {
+            octaves: 2,
+            ..settings(Mode::Chord)
+        };
+        let mut arp = Arp::default();
+        hold(&mut arp, &[64, 60, 67]);
+        let events = run(&mut arp, &s, 0, 3 * STEP, true);
+        assert_eq!(
+            ons(&events),
+            [
+                (0, 60),
+                (0, 64),
+                (0, 67),
+                (STEP, 72),
+                (STEP, 76),
+                (STEP, 79),
+                (2 * STEP, 60),
+                (2 * STEP, 64),
+                (2 * STEP, 67)
+            ]
+        );
+        assert_eq!(offs(&events)[..3], [(3000, 60), (3000, 64), (3000, 67)]);
+        assert_no_overlap(&events);
+    }
+
+    #[test]
+    fn releasing_every_key_ends_the_whole_chord() {
+        let s = settings(Mode::Chord);
+        let mut arp = Arp::default();
+        hold(&mut arp, &[60, 64]);
+        let mut events = run(&mut arp, &s, 0, 10, true);
+        arp.key_off(None, false);
+        events.extend(run(&mut arp, &s, 10, STEP, true));
+        assert_eq!(offs(&events), [(10, 60), (10, 64)]);
+        assert!(arp.is_idle());
+    }
+
+    #[test]
+    fn as_played_follows_the_order_of_key_presses() {
+        let s = Settings {
+            octaves: 2,
+            ..settings(Mode::AsPlayed)
+        };
+        let mut arp = Arp::default();
+        hold(&mut arp, &[67, 60, 64]);
+        let events = run(&mut arp, &s, 0, 6 * STEP, true);
+        assert_eq!(keys(&events), [67, 60, 64, 79, 72, 76]);
+    }
+
+    #[test]
+    fn random_plays_every_note_once_per_cycle() {
+        let s = settings(Mode::Random);
+        let mut arp = Arp::default();
+        hold(&mut arp, &[60, 62, 64, 65, 67]);
+        let played = keys(&run(&mut arp, &s, 0, 40 * STEP, true));
+        for cycle in played.chunks(5) {
+            let mut sorted = cycle.to_vec();
+            sorted.sort();
+            assert_eq!(sorted, [60, 62, 64, 65, 67], "{played:?}");
+        }
+        assert!(played.windows(2).all(|w| w[0] != w[1]), "{played:?}");
+        // Eight identical cycles in a row would be a (1/120)^7 fluke.
+        assert!(
+            played.chunks(5).any(|c| c != &played[..5]),
+            "the order never changes"
+        );
+    }
+
+    /// nice-plug's `assert_process_allocs` allocator aborts the test binary if anything inside
+    /// `assert_no_alloc` allocates.
+    #[test]
+    fn the_realtime_path_never_allocates() {
+        use Mode::*;
+        let modes = [
+            Chord,
+            Up,
+            Down,
+            UpDown,
+            DownUp,
+            Random,
+            AsPlayed,
+            RepeatX2,
+            RepeatX4,
+            Join,
+            Spread,
+            JoinSpread,
+            SpreadJoin,
+            StairsUp,
+            StairsDown,
+            StairsUpDown,
+            StairsDownUp,
+        ];
+        let mut arp = Arp::default();
+        let mut events = 0;
+        for (k, mode) in modes.into_iter().enumerate() {
+            let s = Settings {
+                octaves: 1 + k % MAX_OCTAVES,
+                latch: k % 2 == 0,
+                repeat_ends: k % 3 == 0,
+                ..settings(mode)
+            };
+            nice_assert_no_alloc::assert_no_alloc(|| {
+                // Every MIDI key, then release half and play on, then the rest.
+                for key in 0..128 {
+                    arp.key_on(note(key));
+                }
+                for t in 0..200 {
+                    arp.tick(Some(t as f64 * 0.25), 0.1, &s, &mut |_| events += 1);
+                }
+                for key in (0..128).step_by(2) {
+                    arp.key_off(Some(key), s.latch);
+                }
+                for t in 200..400 {
+                    arp.tick(Some(t as f64 * 0.25), 0.1, &s, &mut |_| events += 1);
+                }
+                arp.key_off(None, false);
+                arp.reset();
+            });
+        }
+        assert!(events > 0);
     }
 
     #[test]
