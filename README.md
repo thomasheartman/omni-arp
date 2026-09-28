@@ -1,8 +1,10 @@
 # omni-arp
 
-A CLAP note-effect arpeggiator with Omnisphere 3's note patterns, Stairs included, built on
-[nice-plug](https://codeberg.org/RustAudio/nice-plug) 0.4.2 (pinned exactly in `Cargo.toml`).
-It has no GUI; every setting is a plain parameter, so Bitwig shows them as device parameters.
+A CLAP note-effect arpeggiator that builds patterns from a few knobs: a shape (straight, stairs,
+climb), a direction, where the walk starts, what it does at the edge, and an optional second
+walker or pedal note. Built on [nice-plug](https://codeberg.org/RustAudio/nice-plug) 0.4.2
+(pinned exactly in `Cargo.toml`). It has no GUI; every setting is a plain parameter, so Bitwig
+shows them as device parameters.
 
 ## Build
 
@@ -25,65 +27,124 @@ allocates.
 
 ## Parameters
 
-| Parameter        | Values                                   | Default   |
-| ---------------- | ---------------------------------------- | --------- |
-| Mode             | Chord, Up, Down, Up/Down, Down/Up, Random, As Played, Repeat X2, Repeat X4, Join, Spread, Join/Spread, Spread/Join, Stairs Up, Stairs Down, Stairs Up/Down, Stairs Down/Up | Stairs Up |
-| Rate             | 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32        | 1/16      |
-| Octaves          | 1–4                                      | 1         |
-| Gate             | 1–100 % of the step                      | 50 %      |
-| Velocity Mode    | As Played, Fixed                         | As Played |
-| Fixed Velocity   | 1–127, used when Velocity Mode is Fixed  | 100       |
+| Parameter        | Values                                                         | Default   |
+| ---------------- | -------------------------------------------------------------- | --------- |
+| Shape            | Straight (+1), Stairs (+2 -1), Climb (+1 +1 -1), Repeat x2, Repeat x4 | Stairs |
+| Direction        | Up, Down                                                       | Up        |
+| Start            | Outside, Middle                                                | Outside   |
+| Edge             | Restart, Reverse, Wrap                                         | Restart   |
+| Pair             | Off, Mirror, Low, High                                         | Off       |
+| Repeat Ends      | Reverse turnarounds play their step twice                      | Off       |
+| Length           | Full, or 1–32 steps before the pattern starts over             | Full      |
+| Notes            | 1, 2, 3, All: the pattern's note on top, plus the next held notes below it | 1 |
+| Rate             | 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32                              | 1/16      |
+| Note Length      | 0–200 % of the step                                            | 100 %     |
+| Octaves Down     | 0–3                                                            | 0         |
+| Octaves Up       | 0–3                                                            | 0         |
+| Octave Behavior  | Thin, 1 by 1, Alt                                              | Thin      |
+| Velocity Mode    | As Played, Fixed, From Trigger                                 | As Played |
+| Fixed Velocity   | 1–127, used when Velocity Mode is Fixed                        | 100       |
+| Advance          | Tempo, Trigger                                                 | Tempo     |
+| Trigger Channel  | 1–16, the channel whose notes step the pattern in Trigger mode | 16        |
 | Latch            | Keep playing after the keys are released; the next chord replaces the old one | Off |
-| Repeat Ends      | Two-part modes play the turnaround note twice. On, Up/Down and Down/Up are Omnisphere's Up/Down+ and Down/Up+ | Off |
-| Restart On Chord | Every chord change restarts the pattern instead of continuing | Off |
+| Restart On Chord | Every chord change restarts the pattern instead of continuing  | Off       |
 
 ## How patterns work
 
-The pool is the held notes sorted by pitch (in press order for As Played), one entry per MIDI
-key. With `n` notes and `R` octaves, patterns walk the indices `0..M` with `M = n * R`, and
-index `i` plays `pool[i % n] + 12 * (i / n)`. Examples with `M = 5` and `M = 6`:
+The pool is the held notes sorted by pitch, one entry per MIDI key. The octave settings stack
+copies of it below and above, and a pattern walks that range. Numbering the notes from 1 (the
+lowest), with 6 notes unless noted:
 
 ```
-Stairs Up       0 2 1 3 2 4 3                  a[2j] = j, a[2j+1] = j + 2
-Stairs Down     4 2 3 1 2 0 1                  Stairs Up mirrored (i -> M - 1 - i)
-Stairs Up/Down  0 2 1 3 2 4 3 4 2 3 1 2 0 1    one, then the other
-Repeat X2       0 0 1 1 2 2 3 3 4 4
-Join            0 5 1 4 2 3                    outside in (the manual's 1-6-2-5-3-4)
-Spread          2 3 1 4 0 5                    inside out (the manual's 3-4-2-5-1-6)
+Straight Up                           1 2 3 4 5 6
+Straight Up, Edge Reverse             1 2 3 4 5 6 5 4 3 2
+Straight Up, Start Middle             4 5 6                    Restart plays one half
+Straight Up, Start Middle, Edge Wrap  4 5 6 1 2 3
+Stairs Up (5 notes)                   1 3 2 4 3 5 4
+Climb Up (5 notes)                    1 2 3 2 3 4 3 4 5 4 5
+Pair Mirror                           1 6 2 5 3 4              Join
+Pair Mirror, Down, Start Middle       3 4 2 5 1 6              Spread
+Pair Mirror, Edge Reverse             1 6 2 5 3 4 2 5          Join/Spread
+Pair Low (5 notes)                    1 2 1 3 1 4 1 5
+Pair High, Down (5 notes)             5 4 5 3 5 2 5 1
 ```
 
-The other modes:
+- **Shape** is how the walk moves from each position: Stairs goes two up and one down, Climb
+  plays three in a row and moves up one. The Repeat shapes walk straight and play each note two
+  or four times.
+- **Direction** Down mirrors the walk top to bottom.
+- **Start** Outside begins at the end opposite the direction. Middle begins at the middle note
+  on the side the walk is heading: the upper middle going up, the lower middle going down.
+- **Edge** decides what happens when the next note would leave the range. Restart starts over
+  from the start, Reverse turns around and walks back from the end it reached, and Wrap carries
+  on from the other end.
+- **Pair** Mirror adds a second walker doing the same shape the opposite way, alternating with
+  the first. Each keeps to its half of the range, so from the outside they walk in (Join) and
+  from the middle they walk out (Spread). Low and High play the lowest or highest note between
+  every step of a walk over the others.
 
-- **Chord** plays every held note at once on each step, walking up the octaves: the chord, then
-  the chord an octave up, and so on.
-- **Random** plays each note once per cycle in a new random order every cycle, and never starts
-  a cycle on the note that ended the last one. Each plugin instance gets its own seed.
-- **As Played** is Up over the notes in the order their keys went down.
+The generator (`src/pattern.rs`) is a pure function of the knobs and the note count, tested for
+every combination of knobs with 1–6 notes and 1–3 octaves.
 
-The generator (`src/pattern.rs`) is a pure function over `M`, tested for `n` 1–6 and
-octaves 1–3.
+### Recipes
+
+| Omnisphere / Bitwig    | Shape    | Direction | Start   | Edge    | Pair   |
+| ---------------------- | -------- | --------- | ------- | ------- | ------ |
+| Up                     | Straight | Up        | Outside | Restart | Off    |
+| Down/Up                | Straight | Down      | Outside | Reverse | Off    |
+| Up/Down+               | Straight | Up        | Outside | Reverse, plus Repeat Ends | Off |
+| Stairs Up/Down         | Stairs   | Up        | Outside | Reverse | Off    |
+| Repeat X2              | Repeat x2 | Up       | Outside | Restart | Off    |
+| Join (Blossom In)      | Straight | Up        | Outside | Restart | Mirror |
+| Spread (Blossom Out)   | Straight | Down      | Middle  | Restart | Mirror |
+| Join/Spread            | Straight | Up        | Outside | Reverse | Mirror |
+| Spread/Join            | Straight | Down      | Middle  | Reverse | Mirror |
+| Low & Down             | Straight | Down      | Outside | Restart | Low    |
+| Hi & Up/Down           | Straight | Up        | Outside | Reverse | High   |
+
+Chord, Random and As Played aren't here; other devices cover them.
+
+### Octave Behavior
+
+With C E G held, Octaves Up 1, and Straight Up with Edge Reverse:
+
+```
+Thin      C E G C' E' G' E' C' G E    one walk over every octave (what Bitwig's arp does)
+1 by 1    C E G E C' E' G' E'         the whole pattern, then again an octave up
+Alt       C C' E E' G G' E E'         each step in every octave before the next step
+```
+
+Going down, 1 by 1 and Alt take the octaves from the top.
+
+### Notes
+
+Each step can play more than the pattern's note. The pattern's note goes on top. Every other held
+note moves into its octave and then drops by octaves until it's below it, and the next highest
+of those fill in. With C E G held and Notes set to All, the steps play `C` over `E G` below it,
+then `E` over `G C`, then `G` over `C E`: the three inversions.
 
 ## Edge-case decisions
 
-- **Overshoot ends the cycle.** A stairs walk stops before the first index that would be `>= M`
-  and loops. It never clamps or skips. The top note is still reached (as the last +2), and the
-  Up/Down seams never repeat a note: Stairs Up ends on `M - 2`, Stairs Down starts on `M - 1`.
-- **Fewer than 3 indices.** A stair can't take its +2 step, so Stairs modes play their plain
-  counterparts. With one note (`n = 1, R = 1`) every mode just repeats it.
-- **Turnarounds.** In the two-part modes (Up/Down, Join/Spread, Stairs Up/Down and their
-  reverses), a note that would play twice in a row where the halves meet or where the cycle
-  loops plays once. Repeat Ends keeps both. Only Up/Down, Down/Up, and Join/Spread and
-  Spread/Join with an odd `M` have such a note. The Stairs halves never meet on the same note.
-- **Odd Join and Spread.** Join ends on the middle note and Spread starts on it, so Spread's
-  pairs run low then high: `M = 5` gives Join `0 4 1 3 2` and Spread `2 1 3 0 4`.
+- **Overshoot ends the pass.** A walk stops before the first note that would leave the range,
+  then follows the Edge setting. It never clamps or skips. The top note is still reached.
+- **Fewer than 3 notes.** Stairs and Climb need three notes to take their steps, and walk
+  straight over fewer. A single note just repeats, and so does a Middle + Restart half of two.
+- **Turnarounds.** When Reverse would play a step twice in a row where the walk turns, or where
+  the cycle loops, the step plays once. Repeat Ends keeps both. A step is a note, or with Pair
+  Mirror a round of both walkers, so Join/Spread plays the middle and outer pairs once per
+  cycle. Stairs and Climb never turn on the same note.
+- **Mirror.** The two halves share the middle note when the count is odd, and a note that would
+  play twice in a row plays once. The walkers can't pass each other, so Wrap acts as Restart.
+- **Low and High.** The pedal note is left out of the walk and plays first.
+- **Length** counts steps played, repeats included. A pattern shorter than Length keeps cycling
+  until Length steps have played: 3 notes with Length 4 play `1 2 3 1 | 1 2 3 1`.
 - **Chord changes** update the pool immediately. By default the pattern continues from the same
-  step, clamped to the new pattern's last step if the pattern got shorter. Restart On Chord
-  switches to starting over. Without latch, a chord played after all keys were up starts at
-  step one.
-- **Octaves above MIDI key 127** are rests, or drop out of the chord in Chord mode. The step is
-  kept so the rhythm doesn't shift.
-- **Keys on several channels.** The pool keeps one entry per key. Output notes use the channel
-  of the key they came from.
+  step, clamped to the new pattern's last step if it got shorter. Restart On Chord starts over
+  instead. Without latch, a chord played after all keys were up starts at step one.
+- **Beyond the MIDI range.** Notes octaves above key 127 or below key 0 are rests, or drop out
+  of the chord with Notes above 1. The step is kept so the rhythm doesn't shift.
+- **Channels.** The pool keeps one entry per key, and output notes use the channel of the key
+  they came from. A note-off only releases a key held on the same channel.
 
 ## Timing
 
@@ -93,11 +154,12 @@ octaves 1–3.
   Pressing play restarts the pattern and plays the first step right away.
 - **Transport stopped:** the arp free-runs from the host tempo (120 BPM if there is none). The
   clock starts on the key press, so the first note sounds immediately.
-- **Gate** is a fraction of the step length, at least one sample. Every note of a step (one,
-  or the whole chord in Chord mode) gets its note-off before the next step's note-ons, on the
-  same sample at 100 %.
+- **Note Length** is a fraction of the step, at least one sample. At 100 % a note ends on the
+  sample the next one starts. Above 100 % notes overlap. A key that comes round again while
+  it's still on is ended first, because MIDI can't hold one key twice and the old note-off would
+  cut the new note short.
 - **Note-offs:** releasing every key (without latch), stopping or starting the transport, and
-  turning latch off with no keys down all end the sounding note immediately. Stopping then
+  turning latch off with no keys down all end every sounding note immediately. Stopping then
   waits one step before free-running, so notes the host releases right after the stop don't
   blip.
 - **Reset and deactivate:** plugins can only send events from `process()`, so `reset()` empties
@@ -106,22 +168,24 @@ octaves 1–3.
 - MIDI CCs, pitch bend, channel pressure and program changes pass through unchanged. Polyphonic
   expressions are dropped, since they're tied to the input keys.
 
-## Differences from Omnisphere
+## Trigger mode
 
-- **Octaves.** Omnisphere's manual says 2 OCT plays the pattern over the held notes and then
-  the same pattern an octave higher. This plugin walks one pattern across all `M` notes
-  instead, as specified. The two agree for Chord, Up, As Played and Repeat X2/X4, and differ
-  for the rest. Stairs Up over C E G with 2 octaves plays `C G E C' G E' C' G' E'` here, but
-  going by the manual `C G E C' G' E'` in Omnisphere.
-- **Not included:** the 2/3/4 OCT Alt octave modes, which play each note through every octave
-  before moving on, and the Loop, Chaos and Once play modes, which act on Omnisphere's step
-  sequencer. This plugin has no step sequencer.
+With Advance set to Trigger, the tempo grid stops driving the arp. Every note-on on the Trigger
+Channel plays the next step at that sample, and the notes it starts end with that trigger's
+note-off, so Rate and Note Length don't apply. Notes on other channels still make up the chord.
+Velocity Mode From Trigger takes each step's velocity from its trigger note.
+
+nice-plug gives a plugin a single note input, which is why triggers are told apart by channel.
+To drive the arp from a drum track in Bitwig, a Note Receiver device ahead of omni-arp can pull
+in the drum track's notes, with their channel remapped to the Trigger Channel (the Channel Map
+device should do that; not tried yet).
 
 ## Platform notes (macOS, Apple Silicon)
 
 - Built and tested on macOS arm64. The CLAP bundle passes
   [clap-validator](https://github.com/free-audio/clap-validator) 0.4.1 (36 passed, 0 failed; the
-  8 skipped tests cover audio ports and presets). It hasn't been tried in Bitwig yet.
+  8 skipped tests cover audio ports and presets). Only the unit tests and the validator have
+  run it; it hasn't been confirmed in Bitwig yet.
 - The bundler signs ad hoc. That's fine for local use; sharing the plugin needs Developer ID
   signing and notarization. For Intel Macs, `cargo xtask bundle-universal omni-arp --release`
   should build a universal binary (needs `rustup target add x86_64-apple-darwin`; untested).

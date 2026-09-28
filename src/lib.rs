@@ -7,8 +7,8 @@ use std::sync::Arc;
 mod arp;
 mod pattern;
 
-use arp::{Arp, Note, Out, Settings};
-use pattern::Mode;
+use arp::{Arp, Note, Out, Settings, Velocity};
+use pattern::{Direction, Edge, OctaveBehavior, Pair, Shape, Spec, Start};
 
 pub struct StairsArp {
     params: Arc<ArpParams>,
@@ -52,64 +52,132 @@ impl Rate {
 }
 
 #[derive(Enum, Debug, Clone, Copy, PartialEq)]
+enum Notes {
+    #[id = "1"]
+    #[name = "1"]
+    One,
+    #[id = "2"]
+    #[name = "2"]
+    Two,
+    #[id = "3"]
+    #[name = "3"]
+    Three,
+    #[id = "all"]
+    All,
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq)]
 enum VelocityMode {
     #[id = "played"]
     #[name = "As Played"]
     AsPlayed,
     #[id = "fixed"]
     Fixed,
+    #[id = "trigger"]
+    #[name = "From Trigger"]
+    FromTrigger,
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq)]
+enum Advance {
+    #[id = "tempo"]
+    Tempo,
+    #[id = "trigger"]
+    Trigger,
 }
 
 #[derive(Params)]
 struct ArpParams {
-    #[id = "mode"]
-    mode: EnumParam<Mode>,
+    #[id = "shape"]
+    shape: EnumParam<Shape>,
+    #[id = "direction"]
+    direction: EnumParam<Direction>,
+    #[id = "start"]
+    start: EnumParam<Start>,
+    #[id = "edge"]
+    edge: EnumParam<Edge>,
+    #[id = "pair"]
+    pair: EnumParam<Pair>,
+    #[id = "repeat-ends"]
+    repeat_ends: BoolParam,
+    #[id = "length"]
+    length: IntParam,
+    #[id = "notes"]
+    notes: EnumParam<Notes>,
     #[id = "rate"]
     rate: EnumParam<Rate>,
-    #[id = "octaves"]
-    octaves: IntParam,
-    #[id = "gate"]
-    gate: FloatParam,
+    #[id = "note-length"]
+    note_length: FloatParam,
+    #[id = "octaves-down"]
+    octaves_down: IntParam,
+    #[id = "octaves-up"]
+    octaves_up: IntParam,
+    #[id = "octave-behavior"]
+    octave_behavior: EnumParam<OctaveBehavior>,
     #[id = "velocity-mode"]
     velocity_mode: EnumParam<VelocityMode>,
     #[id = "velocity"]
     velocity: IntParam,
+    #[id = "advance"]
+    advance: EnumParam<Advance>,
+    #[id = "trigger-channel"]
+    trigger_channel: IntParam,
     #[id = "latch"]
     latch: BoolParam,
-    #[id = "repeat-ends"]
-    repeat_ends: BoolParam,
     #[id = "restart-on-chord"]
     restart_on_chord: BoolParam,
 }
 
 impl Default for ArpParams {
     fn default() -> Self {
-        Self {
-            mode: EnumParam::new("Mode", Mode::StairsUp),
-            rate: EnumParam::new("Rate", Rate::Sixteenth),
-            octaves: IntParam::new(
-                "Octaves",
-                1,
+        let octaves = |name| {
+            IntParam::new(
+                name,
+                0,
                 IntRange::Linear {
-                    min: 1,
-                    max: arp::MAX_OCTAVES as i32,
+                    min: 0,
+                    max: arp::MAX_OCTAVE_SHIFT as i32,
                 },
-            ),
-            gate: FloatParam::new(
-                "Gate",
-                0.5,
-                FloatRange::Linear {
-                    min: 0.01,
-                    max: 1.0,
-                },
+            )
+        };
+        Self {
+            shape: EnumParam::new("Shape", Shape::Stairs),
+            direction: EnumParam::new("Direction", Direction::Up),
+            start: EnumParam::new("Start", Start::Outside),
+            edge: EnumParam::new("Edge", Edge::Restart),
+            pair: EnumParam::new("Pair", Pair::Off),
+            repeat_ends: BoolParam::new("Repeat Ends", false),
+            length: IntParam::new("Length", 0, IntRange::Linear { min: 0, max: 32 })
+                .with_value_to_string(Arc::new(|steps| match steps {
+                    0 => "Full".into(),
+                    steps => steps.to_string(),
+                }))
+                .with_string_to_value(Arc::new(|string| match string.trim() {
+                    full if full.eq_ignore_ascii_case("full") => Some(0),
+                    steps => steps.parse().ok(),
+                })),
+            notes: EnumParam::new("Notes", Notes::One),
+            rate: EnumParam::new("Rate", Rate::Sixteenth),
+            note_length: FloatParam::new(
+                "Note Length",
+                1.0,
+                FloatRange::Linear { min: 0.0, max: 2.0 },
             )
             .with_unit("%")
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage()),
+            octaves_down: octaves("Octaves Down"),
+            octaves_up: octaves("Octaves Up"),
+            octave_behavior: EnumParam::new("Octave Behavior", OctaveBehavior::Thin),
             velocity_mode: EnumParam::new("Velocity Mode", VelocityMode::AsPlayed),
             velocity: IntParam::new("Fixed Velocity", 100, IntRange::Linear { min: 1, max: 127 }),
+            advance: EnumParam::new("Advance", Advance::Tempo),
+            trigger_channel: IntParam::new(
+                "Trigger Channel",
+                16,
+                IntRange::Linear { min: 1, max: 16 },
+            ),
             latch: BoolParam::new("Latch", false),
-            repeat_ends: BoolParam::new("Repeat Ends", false),
             restart_on_chord: BoolParam::new("Restart On Chord", false),
         }
     }
@@ -128,14 +196,33 @@ impl StairsArp {
     fn settings(&self) -> Settings {
         let p = &self.params;
         Settings {
-            mode: p.mode.value(),
+            pattern: Spec {
+                shape: p.shape.value(),
+                direction: p.direction.value(),
+                start: p.start.value(),
+                edge: p.edge.value(),
+                pair: p.pair.value(),
+                repeat_ends: p.repeat_ends.value(),
+                octave_behavior: p.octave_behavior.value(),
+            },
             step_beats: p.rate.value().beats(),
-            octaves: p.octaves.value() as usize,
-            gate: p.gate.value() as f64,
-            velocity: (p.velocity_mode.value() == VelocityMode::Fixed)
-                .then(|| p.velocity.value() as f32 / 127.0),
+            octaves_down: p.octaves_down.value() as usize,
+            octaves_up: p.octaves_up.value() as usize,
+            length: p.length.value() as usize,
+            notes: match p.notes.value() {
+                Notes::One => 1,
+                Notes::Two => 2,
+                Notes::Three => 3,
+                Notes::All => usize::MAX,
+            },
+            note_length: p.note_length.value() as f64,
+            velocity: match p.velocity_mode.value() {
+                VelocityMode::AsPlayed => Velocity::AsPlayed,
+                VelocityMode::Fixed => Velocity::Fixed(p.velocity.value() as f32 / 127.0),
+                VelocityMode::FromTrigger => Velocity::FromTrigger,
+            },
+            triggered: p.advance.value() == Advance::Trigger,
             latch: p.latch.value(),
-            repeat_ends: p.repeat_ends.value(),
             restart_on_chord: p.restart_on_chord.value(),
         }
     }
@@ -143,22 +230,37 @@ impl StairsArp {
     fn handle(
         &mut self,
         event: NoteEvent<()>,
+        timing: u32,
+        s: &Settings,
         context: &mut impl ProcessContext<Self>,
-        latch: bool,
     ) {
+        let mut emit = |out| {
+            let _ = context.try_send_event(to_event(timing, out));
+        };
         match event {
             NoteEvent::NoteOn {
                 key: Key::Number(key),
                 channel,
                 velocity,
                 ..
-            } => self.arp.key_on(Note {
-                key,
-                channel: channel.number().unwrap_or(0),
-                velocity,
-            }),
-            NoteEvent::NoteOff { key, .. } | NoteEvent::Choke { key, .. } => {
-                self.arp.key_off(key.number(), latch)
+            } => {
+                let note = Note {
+                    key,
+                    channel: channel.number().unwrap_or(0),
+                    velocity,
+                };
+                let trigger_channel = self.params.trigger_channel.value() as u8 - 1;
+                if s.triggered && note.channel == trigger_channel {
+                    self.arp.trigger(note, s, &mut emit);
+                } else {
+                    self.arp.key_on(note);
+                }
+            }
+            NoteEvent::NoteOff { key, channel, .. } | NoteEvent::Choke { key, channel, .. } => {
+                // Both, whatever the channel: the note may predate a change of Advance or
+                // Trigger Channel.
+                self.arp.release(key.number(), channel.number(), &mut emit);
+                self.arp.key_off(key.number(), channel.number(), s.latch);
             }
             // The arp replaces the notes; channel-wide messages pass straight through.
             NoteEvent::MidiCC { .. }
@@ -232,10 +334,11 @@ impl Plugin for StairsArp {
         // Without a song position there is no grid to sync to, so free-run as if stopped.
         let start_beat = transport.pos_beats().filter(|_| transport.playing);
 
+        let len = buffer.samples() as u32;
         let mut next = context.next_event();
-        for t in 0..buffer.samples() as u32 {
+        for t in 0..len {
             while let Some(event) = next.filter(|e| e.timing() <= t) {
-                self.handle(event, context, s.latch);
+                self.handle(event, t, &s, context);
                 next = context.next_event();
             }
             let beat = start_beat.map(|b| b + t as f64 * beats_per_sample);
@@ -246,7 +349,7 @@ impl Plugin for StairsArp {
         // Events timed past the end of the buffer shouldn't exist, but a dropped note-off would
         // leave a key in the pool forever.
         while let Some(event) = next {
-            self.handle(event, context, s.latch);
+            self.handle(event, len.saturating_sub(1), &s, context);
             next = context.next_event();
         }
 
@@ -262,7 +365,7 @@ impl Plugin for StairsArp {
 impl ClapPlugin for StairsArp {
     const CLAP_ID: &'static str = "com.thomasheartman.omni-arp";
     const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("Arpeggiator with Omnisphere 3's note patterns");
+        Some("Arpeggiator built from stairs, climbs, mirrored walks and pedal notes");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::NoteEffect];

@@ -1,180 +1,330 @@
 //! Arpeggio patterns as walks over a virtual index space `0..m`, where `m` is the number of held
-//! notes times the octave range. The engine maps index `i` to `pool[i % n] + 12 * (i / n)`, so a
-//! pattern only depends on `m`, never on which notes are held.
+//! notes times the number of octaves. The engine maps index `i` to `pool[i % n]`, shifted by
+//! `i / n` octaves, so a pattern depends only on the counts, never on which notes are held.
+//!
+//! Every pattern is generated going up and mirrored (`i -> m - 1 - i`) for Direction: Down.
 
-// The derive is the only link to the plugin framework; `fill` itself is plain Rust.
+// The derives are the only link to the plugin framework; `fill` itself is plain Rust.
 use nice_plug::prelude::Enum;
 
-/// Omnisphere 3's note patterns, in its menu order. Up/Down+ and Down/Up+ are Up/Down and Down/Up
-/// with `repeat_ends` on.
 #[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    #[id = "chord"]
-    Chord,
+pub enum Shape {
+    #[id = "straight"]
+    Straight,
+    #[id = "stairs"]
+    Stairs,
+    #[id = "climb"]
+    Climb,
+    #[id = "repeat-x2"]
+    #[name = "Repeat x2"]
+    RepeatX2,
+    #[id = "repeat-x4"]
+    #[name = "Repeat x4"]
+    RepeatX4,
+}
+
+impl Shape {
+    /// Notes played from each position before a walk over `m` notes moves on by one: Stairs is
+    /// `+2 -1`, Climb `+1 +1 -1`. Both need three notes, and walk straight over fewer.
+    fn chunk(self, m: usize) -> &'static [usize] {
+        match self {
+            Shape::Stairs if m >= 3 => &[0, 2],
+            Shape::Climb if m >= 3 => &[0, 1, 2],
+            _ => &[0],
+        }
+    }
+
+    /// The Repeat shapes walk straight; the engine plays each of their steps this many times.
+    pub fn repeats(self) -> usize {
+        match self {
+            Shape::RepeatX2 => 2,
+            Shape::RepeatX4 => 4,
+            _ => 1,
+        }
+    }
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
     #[id = "up"]
     Up,
     #[id = "down"]
     Down,
-    #[id = "up-down"]
-    #[name = "Up/Down"]
-    UpDown,
-    #[id = "down-up"]
-    #[name = "Down/Up"]
-    DownUp,
-    #[id = "random"]
-    Random,
-    #[id = "as-played"]
-    #[name = "As Played"]
-    AsPlayed,
-    #[id = "repeat-x2"]
-    #[name = "Repeat X2"]
-    RepeatX2,
-    #[id = "repeat-x4"]
-    #[name = "Repeat X4"]
-    RepeatX4,
-    #[id = "join"]
-    Join,
-    #[id = "spread"]
-    Spread,
-    #[id = "join-spread"]
-    #[name = "Join/Spread"]
-    JoinSpread,
-    #[id = "spread-join"]
-    #[name = "Spread/Join"]
-    SpreadJoin,
-    #[id = "stairs-up"]
-    #[name = "Stairs Up"]
-    StairsUp,
-    #[id = "stairs-down"]
-    #[name = "Stairs Down"]
-    StairsDown,
-    #[id = "stairs-up-down"]
-    #[name = "Stairs Up/Down"]
-    StairsUpDown,
-    #[id = "stairs-down-up"]
-    #[name = "Stairs Down/Up"]
-    StairsDownUp,
 }
 
-/// Upper bound on the cycle length of any mode over `m` indices.
+/// Where the walk starts. Outside is the end opposite the direction; Middle is the middle note
+/// on the side the walk is heading.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    #[id = "outside"]
+    Outside,
+    #[id = "middle"]
+    Middle,
+}
+
+/// What the walk does when its next note would leave the range.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    /// Start over from the start.
+    #[id = "restart"]
+    Restart,
+    /// Turn around and walk back from the end just reached.
+    #[id = "reverse"]
+    Reverse,
+    /// Continue from the other end of the range.
+    #[id = "wrap"]
+    Wrap,
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pair {
+    #[id = "off"]
+    Off,
+    /// A second walker does the same shape the opposite way, alternating with the first. Each
+    /// keeps to its half of the range.
+    #[id = "mirror"]
+    Mirror,
+    /// The lowest note plays between every step of a walk over the others.
+    #[id = "low"]
+    Low,
+    /// The highest note plays between every step of a walk over the others.
+    #[id = "high"]
+    High,
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OctaveBehavior {
+    /// One walk over the notes of every octave.
+    #[id = "thin"]
+    Thin,
+    /// The whole pattern in one octave, then in the next.
+    #[id = "1-by-1"]
+    #[name = "1 by 1"]
+    OneByOne,
+    /// Each step's note in every octave before the next step.
+    #[id = "alt"]
+    Alt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spec {
+    pub shape: Shape,
+    pub direction: Direction,
+    pub start: Start,
+    pub edge: Edge,
+    pub pair: Pair,
+    /// Keep the step that a Reverse turnaround would play twice in a row.
+    pub repeat_ends: bool,
+    pub octave_behavior: OctaveBehavior,
+}
+
+/// Upper bound on the cycle length over `m` indices: two passes of at most `3m` notes each, and
+/// a pedal note between every one of them.
 pub const fn max_len(m: usize) -> usize {
-    4 * m
+    12 * m + 12
 }
 
-/// Replaces `out` with one cycle of `mode` over `0..m`. Doesn't allocate as long as
-/// `out.capacity() >= max_len(m)`.
-///
-/// Chord, Random and As Played are plain Up here. The engine gives them their meaning: Chord walks
-/// octaves and plays the whole pool at each step, Random reshuffles every cycle with [`shuffle`],
-/// and As Played orders the pool by key press instead of pitch.
-///
-/// Stairs walks go +2, -1 from the bottom (`0, 2, 1, 3, 2, 4, ...`) and the cycle ends at the
-/// first step that would leave `0..m`. A stair needs at least three indices to take its +2 step,
-/// so with fewer the Stairs modes play their plain counterparts.
-pub fn fill(out: &mut Vec<usize>, mode: Mode, m: usize, repeat_ends: bool) {
+/// Replaces `out` with one cycle of `spec` over `n` notes in `octaves` octaves. Doesn't allocate
+/// as long as `out.capacity() >= max_len(n * octaves)`.
+pub fn fill(out: &mut Vec<usize>, spec: &Spec, n: usize, octaves: usize) {
     out.clear();
-    if m == 0 {
+    if n == 0 {
+        return;
+    }
+    let down = spec.direction == Direction::Down;
+    match spec.octave_behavior {
+        OctaveBehavior::Thin => walk(out, spec, n * octaves),
+        OctaveBehavior::OneByOne => {
+            walk(out, spec, n);
+            let len = out.len();
+            out.resize(len * octaves, 0);
+            // Back to front, so the first copy is still intact while the others read it.
+            for t in (0..octaves).rev() {
+                let shift = n * if down { octaves - 1 - t } else { t };
+                for k in 0..len {
+                    out[t * len + k] = out[k] + shift;
+                }
+            }
+        }
+        OctaveBehavior::Alt => {
+            walk(out, spec, n);
+            let len = out.len();
+            out.resize(len * octaves, 0);
+            for k in (0..len).rev() {
+                let i = out[k];
+                for t in 0..octaves {
+                    out[k * octaves + t] = i + n * if down { octaves - 1 - t } else { t };
+                }
+            }
+        }
+    }
+}
+
+fn walk(out: &mut Vec<usize>, spec: &Spec, m: usize) {
+    let down = spec.direction == Direction::Down;
+    let pedal = match spec.pair {
+        Pair::Low => 0,
+        Pair::High => m - 1,
+        Pair::Off | Pair::Mirror => {
+            let paired = spec.pair == Pair::Mirror;
+            up(
+                out,
+                spec.shape,
+                spec.start,
+                spec.edge,
+                paired,
+                spec.repeat_ends,
+                m,
+            );
+            if down {
+                mirror(out, m);
+            }
+            return;
+        }
+    };
+
+    // The walker covers every note but the pedal, and the pedal goes before each of its steps.
+    let walker = m - 1;
+    if walker > 0 {
+        up(
+            out,
+            spec.shape,
+            spec.start,
+            spec.edge,
+            false,
+            spec.repeat_ends,
+            walker,
+        );
+        if down {
+            mirror(out, walker);
+        }
+        if spec.pair == Pair::Low {
+            out.iter_mut().for_each(|i| *i += 1);
+        }
+    }
+    let len = out.len();
+    out.resize(2 * len, 0);
+    for k in (0..len).rev() {
+        out[2 * k + 1] = out[k];
+        out[2 * k] = pedal;
+    }
+    if out.is_empty() {
+        out.push(pedal);
+    }
+}
+
+/// One cycle heading up.
+fn up(
+    out: &mut Vec<usize>,
+    shape: Shape,
+    start: Start,
+    edge: Edge,
+    paired: bool,
+    repeat_ends: bool,
+    m: usize,
+) {
+    if paired {
+        let first = pair_pass(out, shape, start, m);
+        // The walkers can't pass each other, so Wrap has nothing to wrap to.
+        if edge == Edge::Reverse {
+            let seam = out.len();
+            let other = match start {
+                Start::Outside => Start::Middle,
+                Start::Middle => Start::Outside,
+            };
+            let second = pair_pass(out, shape, other, m);
+            mirror(&mut out[seam..], m);
+            drop_turnarounds(out, seam, first, second, repeat_ends);
+        }
         return;
     }
 
-    let mode = match mode {
-        Mode::StairsUp if m < 3 => Mode::Up,
-        Mode::StairsDown if m < 3 => Mode::Down,
-        Mode::StairsUpDown if m < 3 => Mode::UpDown,
-        Mode::StairsDownUp if m < 3 => Mode::DownUp,
-        mode => mode,
+    let chunk = shape.chunk(m);
+    let from = match start {
+        Start::Outside => 0,
+        Start::Middle => m / 2,
     };
-    match mode {
-        Mode::Chord | Mode::Up | Mode::Random | Mode::AsPlayed => up(out, m),
-        Mode::Down => down(out, m),
-        Mode::UpDown => both(out, m, repeat_ends, up, down),
-        Mode::DownUp => both(out, m, repeat_ends, down, up),
-        Mode::RepeatX2 => out.extend((0..m).flat_map(|i| std::iter::repeat_n(i, 2))),
-        Mode::RepeatX4 => out.extend((0..m).flat_map(|i| std::iter::repeat_n(i, 4))),
-        Mode::Join => join(out, m),
-        Mode::Spread => spread(out, m),
-        Mode::JoinSpread => both(out, m, repeat_ends, join, spread),
-        Mode::SpreadJoin => both(out, m, repeat_ends, spread, join),
-        Mode::StairsUp => stairs_up(out, m),
-        Mode::StairsDown => stairs_down(out, m),
-        Mode::StairsUpDown => both(out, m, repeat_ends, stairs_up, stairs_down),
-        Mode::StairsDownUp => both(out, m, repeat_ends, stairs_down, stairs_up),
-    }
-}
-
-/// Shuffles `indices` in place with the xorshift64 generator in `state`, which must not be zero.
-/// Swaps the first two if the shuffle would start on `previous`, so a new cycle doesn't repeat the
-/// note that ended the last one.
-pub fn shuffle(indices: &mut [usize], state: &mut u64, previous: usize) {
-    for i in (1..indices.len()).rev() {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        indices.swap(i, (*state % (i as u64 + 1)) as usize);
-    }
-    if indices.len() > 1 && indices[0] == previous {
-        indices.swap(0, 1);
-    }
-}
-
-type Walk = fn(&mut Vec<usize>, usize);
-
-/// Plays `first`, then `second`. Where the two halves meet, and where the cycle loops, a note that
-/// would play twice in a row plays once unless `repeat_ends` is on.
-fn both(out: &mut Vec<usize>, m: usize, repeat_ends: bool, first: Walk, second: Walk) {
-    first(out, m);
-    let seam = out.len();
-    second(out, m);
-    if !repeat_ends {
-        if out[seam] == out[seam - 1] {
-            out.remove(seam);
+    match edge {
+        Edge::Restart => pass(out, chunk, from, m),
+        Edge::Wrap => {
+            for base in from..from + m {
+                out.extend(chunk.iter().map(|k| (base + k) % m));
+            }
         }
-        if out.len() > 1 && out.first() == out.last() {
-            out.pop();
+        Edge::Reverse => {
+            pass(out, chunk, 0, m);
+            let seam = out.len();
+            pass(out, chunk, 0, m);
+            mirror(&mut out[seam..], m);
+            drop_turnarounds(out, seam, (1, 1), (1, 1), repeat_ends);
+            // Same loop, entered at the middle. Every chunk before it is whole.
+            out.rotate_left(from * chunk.len());
         }
     }
 }
 
-fn up(out: &mut Vec<usize>, m: usize) {
-    out.extend(0..m);
+/// Walks up from `from` a chunk at a time, stopping before the first note outside `0..m`.
+fn pass(out: &mut Vec<usize>, chunk: &[usize], from: usize, m: usize) {
+    out.extend(walk_up(chunk, from, m));
 }
 
-fn down(out: &mut Vec<usize>, m: usize) {
-    out.extend((0..m).rev());
+fn walk_up(chunk: &[usize], from: usize, m: usize) -> impl Iterator<Item = usize> + '_ {
+    (from..m)
+        .flat_map(move |base| chunk.iter().map(move |k| base + k))
+        .take_while(move |&i| i < m)
 }
 
-/// Outside in: lowest, highest, second lowest, second highest, and so on.
-fn join(out: &mut Vec<usize>, m: usize) {
-    for j in 0..m / 2 {
-        out.extend([j, m - 1 - j]);
+/// Two walkers, each in its own half of the range (sharing the middle note when `m` is odd),
+/// alternating notes. The leader walks up and the follower mirrors it: from the outside they walk
+/// in toward the middle, from the middle out toward the edges. A note that would play twice in a
+/// row plays once. Returns the number of notes in the first and last rounds.
+fn pair_pass(out: &mut Vec<usize>, shape: Shape, start: Start, m: usize) -> (usize, usize) {
+    let half = m.div_ceil(2);
+    let (mut first, mut last) = (0, 0);
+    let mut previous = None;
+    for i in walk_up(shape.chunk(half), 0, half) {
+        let (lead, follow) = match start {
+            Start::Outside => (i, m - 1 - i),
+            Start::Middle => (m - half + i, half - 1 - i),
+        };
+        let round = out.len();
+        for note in [lead, follow] {
+            if previous != Some(note) {
+                out.push(note);
+                previous = Some(note);
+            }
+        }
+        if out.len() > round {
+            last = out.len() - round;
+            if first == 0 {
+                first = last;
+            }
+        }
     }
-    if m % 2 == 1 {
-        out.push(m / 2);
-    }
+    (first, last)
 }
 
-/// Inside out: Join's pairs in reverse order, each still low then high. An odd middle goes first.
-fn spread(out: &mut Vec<usize>, m: usize) {
-    if m % 2 == 1 {
-        out.push(m / 2);
+/// `out[seam..]` is the walk back after `out[..seam]`. Unless `repeat_ends`, a step that would
+/// play twice in a row where they meet, or where the cycle loops, plays once. A step is a note,
+/// or a round of both walkers; `first` and `last` are the sizes of each part's first and last.
+fn drop_turnarounds(
+    out: &mut Vec<usize>,
+    seam: usize,
+    first: (usize, usize),
+    second: (usize, usize),
+    repeat_ends: bool,
+) {
+    if repeat_ends {
+        return;
     }
-    for j in (0..m / 2).rev() {
-        out.extend([j, m - 1 - j]);
+    if out[seam - first.1..seam] == out[seam..seam + second.0] {
+        out.drain(seam..seam + second.0);
     }
-}
-
-/// `a[2j] = j, a[2j + 1] = j + 2`, stopping before `j + 2` reaches `m`. Needs `m >= 3`.
-fn stairs_up(out: &mut Vec<usize>, m: usize) {
-    for j in 0..m - 2 {
-        out.extend([j, j + 2]);
+    // If the walk back was a single step, it's gone and the loop seam is already fine.
+    let len = out.len();
+    if len > seam && out[len - second.1..] == out[..first.0] {
+        out.truncate(len - second.1);
     }
-    out.push(m - 2);
-}
-
-fn stairs_down(out: &mut Vec<usize>, m: usize) {
-    let start = out.len();
-    stairs_up(out, m);
-    mirror(&mut out[start..], m);
 }
 
 /// Reflects indices top to bottom, turning an upward walk into its downward twin.
@@ -188,99 +338,361 @@ fn mirror(indices: &mut [usize], m: usize) {
 mod tests {
     use super::*;
 
-    const MODES: [Mode; 17] = [
-        Mode::Chord,
-        Mode::Up,
-        Mode::Down,
-        Mode::UpDown,
-        Mode::DownUp,
-        Mode::Random,
-        Mode::AsPlayed,
-        Mode::RepeatX2,
-        Mode::RepeatX4,
-        Mode::Join,
-        Mode::Spread,
-        Mode::JoinSpread,
-        Mode::SpreadJoin,
-        Mode::StairsUp,
-        Mode::StairsDown,
-        Mode::StairsUpDown,
-        Mode::StairsDownUp,
+    const SHAPES: [Shape; 5] = [
+        Shape::Straight,
+        Shape::Stairs,
+        Shape::Climb,
+        Shape::RepeatX2,
+        Shape::RepeatX4,
+    ];
+    const EDGES: [Edge; 3] = [Edge::Restart, Edge::Reverse, Edge::Wrap];
+    const PAIRS: [Pair; 4] = [Pair::Off, Pair::Mirror, Pair::Low, Pair::High];
+    const BEHAVIORS: [OctaveBehavior; 3] = [
+        OctaveBehavior::Thin,
+        OctaveBehavior::OneByOne,
+        OctaveBehavior::Alt,
     ];
 
-    fn pattern(mode: Mode, n: usize, octaves: usize, repeat_ends: bool) -> Vec<usize> {
+    fn spec(shape: Shape, direction: Direction, start: Start, edge: Edge, pair: Pair) -> Spec {
+        Spec {
+            shape,
+            direction,
+            start,
+            edge,
+            pair,
+            repeat_ends: false,
+            octave_behavior: OctaveBehavior::Thin,
+        }
+    }
+
+    fn every_spec() -> impl Iterator<Item = Spec> {
+        SHAPES.into_iter().flat_map(|shape| {
+            [Direction::Up, Direction::Down]
+                .into_iter()
+                .flat_map(move |direction| {
+                    [Start::Outside, Start::Middle]
+                        .into_iter()
+                        .flat_map(move |start| {
+                            EDGES.into_iter().flat_map(move |edge| {
+                                PAIRS.into_iter().flat_map(move |pair| {
+                                    BEHAVIORS.into_iter().flat_map(move |octave_behavior| {
+                                        [false, true].map(|repeat_ends| Spec {
+                                            repeat_ends,
+                                            octave_behavior,
+                                            ..spec(shape, direction, start, edge, pair)
+                                        })
+                                    })
+                                })
+                            })
+                        })
+                })
+        })
+    }
+
+    fn pattern(spec: &Spec, n: usize, octaves: usize) -> Vec<usize> {
         let mut out = Vec::new();
-        fill(&mut out, mode, n * octaves, repeat_ends);
+        fill(&mut out, spec, n, octaves);
         out
     }
 
     #[test]
     fn known_cycles() {
-        use Mode::*;
-        let cases: &[(Mode, usize, bool, &[usize])] = &[
-            (Up, 4, false, &[0, 1, 2, 3]),
-            (Down, 4, false, &[3, 2, 1, 0]),
-            (UpDown, 4, false, &[0, 1, 2, 3, 2, 1]),
-            (UpDown, 4, true, &[0, 1, 2, 3, 3, 2, 1, 0]),
-            (DownUp, 4, false, &[3, 2, 1, 0, 1, 2]),
-            (DownUp, 4, true, &[3, 2, 1, 0, 0, 1, 2, 3]),
-            (RepeatX2, 3, false, &[0, 0, 1, 1, 2, 2]),
-            (RepeatX4, 2, false, &[0, 0, 0, 0, 1, 1, 1, 1]),
-            // The manual's six-note examples: 1-6-2-5-3-4 and 3-4-2-5-1-6.
-            (Join, 6, false, &[0, 5, 1, 4, 2, 3]),
-            (Spread, 6, false, &[2, 3, 1, 4, 0, 5]),
-            (Join, 5, false, &[0, 4, 1, 3, 2]),
-            (Spread, 5, false, &[2, 1, 3, 0, 4]),
-            (JoinSpread, 6, false, &[0, 5, 1, 4, 2, 3, 2, 3, 1, 4, 0, 5]),
-            (SpreadJoin, 6, false, &[2, 3, 1, 4, 0, 5, 0, 5, 1, 4, 2, 3]),
-            // An odd middle would play twice where Join and Spread meet.
-            (JoinSpread, 5, false, &[0, 4, 1, 3, 2, 1, 3, 0, 4]),
-            (JoinSpread, 5, true, &[0, 4, 1, 3, 2, 2, 1, 3, 0, 4]),
-            (SpreadJoin, 5, false, &[2, 1, 3, 0, 4, 0, 4, 1, 3]),
-            (StairsUp, 3, false, &[0, 2, 1]),
-            (StairsUp, 5, false, &[0, 2, 1, 3, 2, 4, 3]),
-            (StairsDown, 5, false, &[4, 2, 3, 1, 2, 0, 1]),
-            (StairsUpDown, 4, false, &[0, 2, 1, 3, 2, 3, 1, 2, 0, 1]),
-            (StairsDownUp, 4, false, &[3, 1, 2, 0, 1, 0, 2, 1, 3, 2]),
-            // Too few indices for a stair: plain walks.
-            (StairsUp, 2, false, &[0, 1]),
-            (StairsDown, 2, false, &[1, 0]),
-            (StairsUpDown, 2, false, &[0, 1]),
+        use Direction::*;
+        use Edge::*;
+        use Pair::*;
+        use Shape::*;
+        use Start::*;
+        let cases: &[(Spec, usize, &[usize])] = &[
+            (spec(Straight, Up, Outside, Restart, Off), 4, &[0, 1, 2, 3]),
+            (
+                spec(Straight, Down, Outside, Restart, Off),
+                4,
+                &[3, 2, 1, 0],
+            ),
+            (
+                spec(Straight, Up, Outside, Reverse, Off),
+                4,
+                &[0, 1, 2, 3, 2, 1],
+            ),
+            (
+                spec(Straight, Down, Outside, Reverse, Off),
+                4,
+                &[3, 2, 1, 0, 1, 2],
+            ),
+            (spec(Straight, Up, Outside, Wrap, Off), 4, &[0, 1, 2, 3]),
+            // Middle: the upper middle note going up, the lower going down.
+            (spec(Straight, Up, Middle, Restart, Off), 6, &[3, 4, 5]),
+            (spec(Straight, Up, Middle, Restart, Off), 5, &[2, 3, 4]),
+            (spec(Straight, Down, Middle, Restart, Off), 6, &[2, 1, 0]),
+            (
+                spec(Straight, Up, Middle, Wrap, Off),
+                6,
+                &[3, 4, 5, 0, 1, 2],
+            ),
+            (
+                spec(Straight, Up, Middle, Reverse, Off),
+                6,
+                &[3, 4, 5, 4, 3, 2, 1, 0, 1, 2],
+            ),
+            (
+                spec(Stairs, Up, Outside, Restart, Off),
+                5,
+                &[0, 2, 1, 3, 2, 4, 3],
+            ),
+            (
+                spec(Stairs, Down, Outside, Restart, Off),
+                5,
+                &[4, 2, 3, 1, 2, 0, 1],
+            ),
+            (
+                spec(Stairs, Up, Outside, Reverse, Off),
+                4,
+                &[0, 2, 1, 3, 2, 3, 1, 2, 0, 1],
+            ),
+            (
+                spec(Stairs, Down, Outside, Reverse, Off),
+                4,
+                &[3, 1, 2, 0, 1, 0, 2, 1, 3, 2],
+            ),
+            (
+                spec(Stairs, Up, Outside, Wrap, Off),
+                5,
+                &[0, 2, 1, 3, 2, 4, 3, 0, 4, 1],
+            ),
+            (spec(Stairs, Up, Outside, Restart, Off), 2, &[0, 1]),
+            (
+                spec(Climb, Up, Outside, Restart, Off),
+                5,
+                &[0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4],
+            ),
+            (
+                spec(Climb, Down, Outside, Restart, Off),
+                5,
+                &[4, 3, 2, 3, 2, 1, 2, 1, 0, 1, 0],
+            ),
+            (
+                spec(Climb, Up, Outside, Reverse, Off),
+                3,
+                &[0, 1, 2, 1, 2, 1, 0, 1],
+            ),
+            // Join, Spread and their combinations, as in the manual's six-note examples.
+            (
+                spec(Straight, Up, Outside, Restart, Mirror),
+                6,
+                &[0, 5, 1, 4, 2, 3],
+            ),
+            (
+                spec(Straight, Up, Outside, Restart, Mirror),
+                5,
+                &[0, 4, 1, 3, 2],
+            ),
+            (
+                spec(Straight, Down, Middle, Restart, Mirror),
+                6,
+                &[2, 3, 1, 4, 0, 5],
+            ),
+            (
+                spec(Straight, Down, Middle, Restart, Mirror),
+                5,
+                &[2, 1, 3, 0, 4],
+            ),
+            (
+                spec(Straight, Up, Middle, Restart, Mirror),
+                6,
+                &[3, 2, 4, 1, 5, 0],
+            ),
+            (
+                spec(Straight, Up, Outside, Reverse, Mirror),
+                6,
+                &[0, 5, 1, 4, 2, 3, 1, 4],
+            ),
+            (
+                spec(Straight, Up, Outside, Reverse, Mirror),
+                5,
+                &[0, 4, 1, 3, 2, 1, 3],
+            ),
+            (
+                spec(Straight, Down, Middle, Reverse, Mirror),
+                6,
+                &[2, 3, 1, 4, 0, 5, 1, 4],
+            ),
+            (
+                spec(Straight, Down, Middle, Reverse, Mirror),
+                5,
+                &[2, 1, 3, 0, 4, 1, 3],
+            ),
+            (
+                spec(Straight, Up, Outside, Restart, Low),
+                5,
+                &[0, 1, 0, 2, 0, 3, 0, 4],
+            ),
+            (
+                spec(Straight, Down, Outside, Restart, Low),
+                5,
+                &[0, 4, 0, 3, 0, 2, 0, 1],
+            ),
+            (
+                spec(Straight, Up, Outside, Reverse, Low),
+                5,
+                &[0, 1, 0, 2, 0, 3, 0, 4, 0, 3, 0, 2],
+            ),
+            (
+                spec(Straight, Down, Outside, Reverse, Low),
+                5,
+                &[0, 4, 0, 3, 0, 2, 0, 1, 0, 2, 0, 3],
+            ),
+            (
+                spec(Straight, Up, Outside, Restart, High),
+                5,
+                &[4, 0, 4, 1, 4, 2, 4, 3],
+            ),
+            (
+                spec(Straight, Down, Outside, Restart, High),
+                5,
+                &[4, 3, 4, 2, 4, 1, 4, 0],
+            ),
+            (spec(Straight, Up, Outside, Restart, Low), 2, &[0, 1]),
+            (spec(Straight, Up, Outside, Restart, Low), 1, &[0]),
             // A single note just repeats.
-            (StairsUpDown, 1, false, &[0]),
-            (UpDown, 1, false, &[0]),
+            (spec(Stairs, Up, Outside, Reverse, Mirror), 1, &[0]),
+            (spec(Climb, Down, Middle, Wrap, Off), 1, &[0]),
+            // Mirrored stairs, each walker in its half: 0 2 1 below, 5 3 4 above.
+            (
+                spec(Stairs, Up, Outside, Restart, Mirror),
+                6,
+                &[0, 5, 2, 3, 1, 4],
+            ),
+            // The halves share the middle note, which plays once.
+            (
+                spec(Stairs, Up, Outside, Restart, Mirror),
+                5,
+                &[0, 4, 2, 1, 3],
+            ),
         ];
-        for &(mode, m, repeat_ends, expected) in cases {
-            assert_eq!(pattern(mode, m, 1, repeat_ends), expected, "{mode:?} m={m}");
+        for (spec, m, expected) in cases {
+            assert_eq!(pattern(spec, *m, 1), *expected, "{spec:?} m={m}");
         }
     }
 
     #[test]
+    fn repeat_ends_keeps_the_turnarounds() {
+        use Direction::*;
+        use Edge::*;
+        use Pair::*;
+        use Shape::*;
+        use Start::*;
+        let cases: &[(Spec, usize, &[usize])] = &[
+            (
+                spec(Straight, Up, Outside, Reverse, Off),
+                4,
+                &[0, 1, 2, 3, 3, 2, 1, 0],
+            ),
+            (
+                spec(Straight, Down, Outside, Reverse, Off),
+                4,
+                &[3, 2, 1, 0, 0, 1, 2, 3],
+            ),
+            (
+                spec(Straight, Up, Outside, Reverse, Mirror),
+                6,
+                &[0, 5, 1, 4, 2, 3, 2, 3, 1, 4, 0, 5],
+            ),
+            (
+                spec(Straight, Up, Outside, Reverse, Mirror),
+                5,
+                &[0, 4, 1, 3, 2, 2, 1, 3, 0, 4],
+            ),
+            (
+                spec(Straight, Down, Middle, Reverse, Mirror),
+                5,
+                &[2, 1, 3, 0, 4, 0, 4, 1, 3, 2],
+            ),
+        ];
+        for (spec, m, expected) in cases {
+            let spec = Spec {
+                repeat_ends: true,
+                ..*spec
+            };
+            assert_eq!(pattern(&spec, *m, 1), *expected, "{spec:?} m={m}");
+        }
+    }
+
+    #[test]
+    fn octave_behaviors() {
+        let up_down = spec(
+            Shape::Straight,
+            Direction::Up,
+            Start::Outside,
+            Edge::Reverse,
+            Pair::Off,
+        );
+        let down = spec(
+            Shape::Straight,
+            Direction::Down,
+            Start::Outside,
+            Edge::Restart,
+            Pair::Off,
+        );
+        let with = |spec: Spec, octave_behavior| Spec {
+            octave_behavior,
+            ..spec
+        };
+        // Three notes, two octaves: indices 3..6 are the octave above.
+        assert_eq!(pattern(&up_down, 3, 2), [0, 1, 2, 3, 4, 5, 4, 3, 2, 1]);
+        assert_eq!(
+            pattern(&with(up_down, OctaveBehavior::OneByOne), 3, 2),
+            [0, 1, 2, 1, 3, 4, 5, 4]
+        );
+        assert_eq!(
+            pattern(&with(up_down, OctaveBehavior::Alt), 3, 2),
+            [0, 3, 1, 4, 2, 5, 1, 4]
+        );
+        // Going down, the octaves go down too.
+        assert_eq!(
+            pattern(&with(down, OctaveBehavior::OneByOne), 3, 2),
+            [5, 4, 3, 2, 1, 0]
+        );
+        assert_eq!(
+            pattern(&with(down, OctaveBehavior::Alt), 3, 2),
+            [5, 2, 4, 1, 3, 0]
+        );
+    }
+
+    #[test]
     fn stairs_follow_the_formula_until_the_ceiling() {
+        let stairs = spec(
+            Shape::Stairs,
+            Direction::Up,
+            Start::Outside,
+            Edge::Restart,
+            Pair::Off,
+        );
         for m in 3..=18 {
-            let p = pattern(Mode::StairsUp, m, 1, false);
+            let p = pattern(&stairs, m, 1);
             assert_eq!(p.len(), 2 * m - 3, "m={m}");
             for (k, &i) in p.iter().enumerate() {
                 let j = k / 2;
                 assert_eq!(i, if k % 2 == 0 { j } else { j + 2 }, "m={m} k={k}");
             }
-            // The next step would be `m`, out of range: that is where the cycle ends.
-            assert_eq!(p.len() / 2 + 2, m);
         }
     }
 
     #[test]
-    fn every_mode_covers_the_whole_range_for_n_1_to_6_and_octaves_1_to_3() {
-        for n in 1..=6 {
-            for octaves in 1..=3 {
-                let m = n * octaves;
-                for mode in MODES {
-                    for repeat_ends in [false, true] {
-                        let p = pattern(mode, n, octaves, repeat_ends);
-                        let ctx = format!("{mode:?} n={n} octaves={octaves} repeat={repeat_ends}");
-                        assert!(!p.is_empty() && p.len() <= max_len(m), "{ctx}");
-                        assert!(p.iter().all(|&i| i < m), "{ctx}: {p:?}");
-                        assert!((0..m).all(|i| p.contains(&i)), "{ctx}: skips a note {p:?}");
+    fn every_spec_stays_in_range_and_covers_it_for_n_1_to_6_and_octaves_1_to_3() {
+        for spec in every_spec() {
+            for n in 1..=6 {
+                for octaves in 1..=3 {
+                    let m = n * octaves;
+                    let p = pattern(&spec, n, octaves);
+                    let ctx = format!("{spec:?} n={n} octaves={octaves}: {p:?}");
+                    assert!(!p.is_empty() && p.len() <= max_len(m), "{ctx}");
+                    assert!(p.iter().all(|&i| i < m), "{ctx}");
+                    // Restarting from the middle plays one half by design; Mirror covers both.
+                    let half = spec.start == Start::Middle
+                        && spec.edge == Edge::Restart
+                        && spec.pair != Pair::Mirror;
+                    if !half {
+                        assert!((0..m).all(|i| p.contains(&i)), "{ctx}");
                     }
                 }
             }
@@ -288,73 +700,52 @@ mod tests {
     }
 
     #[test]
-    fn no_note_plays_twice_in_a_row_unless_asked_to() {
-        for m in 2..=18 {
-            for mode in MODES {
-                if matches!(mode, Mode::RepeatX2 | Mode::RepeatX4) {
-                    continue;
-                }
-                let p = pattern(mode, m, 1, false);
-                // Includes the seam from the last step back to the first.
-                for (k, &i) in p.iter().enumerate() {
-                    assert_ne!(i, p[(k + 1) % p.len()], "{mode:?} m={m}: {p:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn downward_modes_mirror_upward_ones() {
-        let pairs = [
-            (Mode::Up, Mode::Down),
-            (Mode::UpDown, Mode::DownUp),
-            (Mode::StairsUp, Mode::StairsDown),
-            (Mode::StairsUpDown, Mode::StairsDownUp),
-        ];
-        for m in 1..=18 {
-            for (up, down) in pairs {
-                for repeat_ends in [false, true] {
-                    let mut mirrored = pattern(up, m, 1, repeat_ends);
-                    mirror(&mut mirrored, m);
-                    assert_eq!(mirrored, pattern(down, m, 1, repeat_ends), "{up:?} m={m}");
+    fn no_note_plays_twice_in_a_row_unless_repeat_ends() {
+        for spec in every_spec().filter(|s| !s.repeat_ends) {
+            for n in 1..=6 {
+                for octaves in 1..=3 {
+                    let p = pattern(&spec, n, octaves);
+                    // One note, or half of two: a single note repeating is the point.
+                    if p.len() < 2 {
+                        continue;
+                    }
+                    // Includes the seam from the last step back to the first.
+                    for (k, &i) in p.iter().enumerate() {
+                        let next = p[(k + 1) % p.len()];
+                        assert_ne!(i, next, "{spec:?} n={n} octaves={octaves}: {p:?}");
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn shuffle_permutes_without_repeating_across_cycles() {
-        let mut state = 0x9e37_79b9_7f4a_7c15;
-        for m in 1..=18 {
-            let mut p = pattern(Mode::Random, m, 1, false);
-            let mut orders = std::collections::HashSet::new();
-            for _ in 0..50 {
-                let previous = *p.last().unwrap();
-                shuffle(&mut p, &mut state, previous);
-                let mut sorted = p.clone();
-                sorted.sort();
-                assert_eq!(sorted, (0..m).collect::<Vec<_>>(), "m={m}");
-                if m > 1 {
-                    assert_ne!(p[0], previous, "m={m}");
-                }
-                orders.insert(p.clone());
-            }
-            if m >= 3 {
-                assert!(orders.len() > 1, "m={m}: the order never changes");
+    fn down_mirrors_up() {
+        for up in every_spec().filter(|s| {
+            s.direction == Direction::Up
+                && s.octave_behavior == OctaveBehavior::Thin
+                && matches!(s.pair, Pair::Off | Pair::Mirror)
+        }) {
+            let down = Spec {
+                direction: Direction::Down,
+                ..up
+            };
+            for m in 1..=12 {
+                let mut mirrored = pattern(&up, m, 1);
+                mirror(&mut mirrored, m);
+                assert_eq!(mirrored, pattern(&down, m, 1), "{up:?} m={m}");
             }
         }
     }
 
     #[test]
     fn fill_stays_within_capacity() {
-        let m = 128 * 4;
-        let mut out = Vec::with_capacity(max_len(m));
+        let (n, octaves) = (128, 7);
+        let mut out = Vec::with_capacity(max_len(n * octaves));
         let capacity = out.capacity();
-        for mode in MODES {
-            for repeat_ends in [false, true] {
-                fill(&mut out, mode, m, repeat_ends);
-                assert_eq!(out.capacity(), capacity, "{mode:?} reallocated");
-            }
+        for spec in every_spec() {
+            fill(&mut out, &spec, n, octaves);
+            assert_eq!(out.capacity(), capacity, "{spec:?} reallocated");
         }
     }
 }
