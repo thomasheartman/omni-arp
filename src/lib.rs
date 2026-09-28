@@ -73,9 +73,6 @@ enum VelocityMode {
     AsPlayed,
     #[id = "fixed"]
     Fixed,
-    #[id = "trigger"]
-    #[name = "From Trigger"]
-    FromTrigger,
 }
 
 #[derive(Enum, Debug, Clone, Copy, PartialEq)]
@@ -236,7 +233,6 @@ impl StairsArp {
             velocity: match p.velocity_mode.value() {
                 VelocityMode::AsPlayed => Velocity::AsPlayed,
                 VelocityMode::Fixed => Velocity::Fixed(p.velocity.value() as f32 / 127.0),
-                VelocityMode::FromTrigger => Velocity::FromTrigger,
             },
             triggered: p.advance.value() == Advance::Trigger,
             latch: p.latch.value(),

@@ -22,10 +22,9 @@ pub enum Out {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Velocity {
+    /// Each held note's own velocity, or the trigger's when a trigger note steps the pattern.
     AsPlayed,
     Fixed(f32),
-    /// The trigger note's velocity; as played on the tempo grid.
-    FromTrigger,
 }
 
 pub struct Settings {
@@ -294,9 +293,8 @@ impl Arp {
             // Octaves past either end of the MIDI range are rests.
             if (0..MAX_KEYS as i32).contains(&key) {
                 let velocity = match s.velocity {
-                    Velocity::AsPlayed => note.velocity,
+                    Velocity::AsPlayed => trigger_velocity.unwrap_or(note.velocity),
                     Velocity::Fixed(velocity) => velocity,
-                    Velocity::FromTrigger => trigger_velocity.unwrap_or(note.velocity),
                 };
                 // The top note is the accent.
                 let velocity = if voice == 0 {
@@ -914,7 +912,6 @@ mod tests {
     fn triggers_step_the_pattern_and_end_its_notes() {
         let s = Settings {
             triggered: true,
-            velocity: Velocity::FromTrigger,
             ..settings(Shape::Straight)
         };
         let mut arp = Arp::default();

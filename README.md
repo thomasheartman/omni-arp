@@ -45,7 +45,7 @@ allocates.
 | Octaves Down     | 0–3                                                            | 0         |
 | Octaves Up       | 0–3                                                            | 0         |
 | Octave Behavior  | Thin, 1 by 1, Alt                                              | Thin      |
-| Velocity Mode    | As Played, Fixed, From Trigger                                 | As Played |
+| Velocity Mode    | As Played (in Trigger mode, the trigger's velocity), Fixed     | As Played |
 | Fixed Velocity   | 1–127, used when Velocity Mode is Fixed                        | 100       |
 | **Input**        |                                                                |           |
 | Advance          | Tempo, Trigger                                                 | Tempo     |
@@ -178,12 +178,14 @@ note by playing the others quieter, at 80 % of their usual velocity by default.
 With Advance set to Trigger, the tempo grid stops driving the arp. Every note-on on the Trigger
 Channel plays the next step at that sample, and the notes it starts end with that trigger's
 note-off, so Rate and Note Length don't apply. Notes on other channels still make up the chord.
-Velocity Mode From Trigger takes each step's velocity from its trigger note.
+With Velocity Mode As Played, each step takes its velocity from the trigger note; Fixed still
+overrides it.
 
 nice-plug gives a plugin a single note input, which is why triggers are told apart by channel.
-To drive the arp from a drum track in Bitwig, a Note Receiver device ahead of omni-arp can pull
-in the drum track's notes, with their channel remapped to the Trigger Channel (the Channel Map
-device should do that; not tried yet).
+To drive the arp from a drum track in Bitwig, put a Note Receiver pulling in the drum track's
+notes inside a Note FX Layer ahead of omni-arp, with those notes moved to the Trigger Channel.
+The layer matters: a Note Receiver straight in the chain replaces the track's own notes instead
+of merging with them.
 
 ## Platform notes (macOS, Apple Silicon)
 

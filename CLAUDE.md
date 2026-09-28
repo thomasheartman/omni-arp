@@ -62,11 +62,14 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
 - Note Length above 100 % overlaps notes. A key that comes round while still on is ended first,
   since MIDI can't hold one key twice.
 - Trigger mode tells triggers apart by MIDI channel because nice-plug gives a plugin one note
-  input. Each trigger's note-off ends the notes it started.
+  input. Each trigger's note-off ends the notes it started, and with Velocity Mode As Played the
+  trigger sets the velocity. (A separate From Trigger velocity mode was removed as redundant.)
 - Custom step patterns (arbitrary intervals) would need a GUI, so they're postponed. New shapes
   get added in code on request.
 
 ## Open items
 
-- Runs in Bitwig on macOS, confirmed by the user on 2026-09-28. The trigger routing (Note
-  Receiver plus a channel remap to the Trigger Channel) hasn't been confirmed specifically.
+- Runs in Bitwig on macOS, trigger mode included, confirmed by the user on 2026-09-28. In
+  Bitwig the Note Receiver has to sit inside a Note FX Layer to merge with the track's own notes.
+- Debugging in Bitwig: `~/Library/Logs/Bitwig/engine.log` has plugin-host events but not the
+  plugin's output. A temporary probe that appends to a file in `/tmp` works; remove it after.
