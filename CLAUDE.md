@@ -66,6 +66,10 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
   trigger sets the velocity. (A separate From Trigger velocity mode was removed as redundant.)
 - Custom step patterns (arbitrary intervals) would need a GUI, so they're postponed. New shapes
   get added in code on request.
+- Accent patterns are postponed with them. Example: a 3+3+2 rhythm with an accent on the first
+  step of each group. Bitwig's own arp does this with a drawable velocity lane; without a GUI
+  the nearest option would be a knob choosing from preset groupings (4, 3, 3+3+2, ...) plus an
+  accent amount.
 
 ## Open items
 
