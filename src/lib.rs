@@ -86,6 +86,7 @@ enum Advance {
     Trigger,
 }
 
+/// In the order of the remote control pages: pattern, notes, input.
 #[derive(Params)]
 struct ArpParams {
     #[id = "shape"]
@@ -102,10 +103,13 @@ struct ArpParams {
     repeat_ends: BoolParam,
     #[id = "length"]
     length: IntParam,
-    #[id = "notes"]
-    notes: EnumParam<Notes>,
     #[id = "rate"]
     rate: EnumParam<Rate>,
+
+    #[id = "notes"]
+    notes: EnumParam<Notes>,
+    #[id = "chord-velocity"]
+    chord_velocity: FloatParam,
     #[id = "note-length"]
     note_length: FloatParam,
     #[id = "octaves-down"]
@@ -118,6 +122,7 @@ struct ArpParams {
     velocity_mode: EnumParam<VelocityMode>,
     #[id = "velocity"]
     velocity: IntParam,
+
     #[id = "advance"]
     advance: EnumParam<Advance>,
     #[id = "trigger-channel"]
@@ -157,6 +162,17 @@ impl Default for ArpParams {
                     steps => steps.parse().ok(),
                 })),
             notes: EnumParam::new("Notes", Notes::One),
+            chord_velocity: FloatParam::new(
+                "Chord Velocity",
+                0.8,
+                FloatRange::Linear {
+                    min: 0.01,
+                    max: 1.0,
+                },
+            )
+            .with_unit("%")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage()),
             rate: EnumParam::new("Rate", Rate::Sixteenth),
             note_length: FloatParam::new(
                 "Note Length",
@@ -215,6 +231,7 @@ impl StairsArp {
                 Notes::Three => 3,
                 Notes::All => usize::MAX,
             },
+            chord_velocity: p.chord_velocity.value(),
             note_length: p.note_length.value() as f64,
             velocity: match p.velocity_mode.value() {
                 VelocityMode::AsPlayed => Velocity::AsPlayed,
@@ -369,6 +386,38 @@ impl ClapPlugin for StairsArp {
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::NoteEffect];
+
+    fn remote_controls(&self, context: &mut impl RemoteControlsContext) {
+        let p = &self.params;
+        context.add_section("omni-arp", |section| {
+            section.add_page("Pattern", |page| {
+                page.add_param(&p.shape);
+                page.add_param(&p.direction);
+                page.add_param(&p.start);
+                page.add_param(&p.edge);
+                page.add_param(&p.pair);
+                page.add_param(&p.repeat_ends);
+                page.add_param(&p.length);
+                page.add_param(&p.rate);
+            });
+            section.add_page("Notes", |page| {
+                page.add_param(&p.notes);
+                page.add_param(&p.chord_velocity);
+                page.add_param(&p.note_length);
+                page.add_param(&p.octaves_down);
+                page.add_param(&p.octaves_up);
+                page.add_param(&p.octave_behavior);
+                page.add_param(&p.velocity_mode);
+                page.add_param(&p.velocity);
+            });
+            section.add_page("Input", |page| {
+                page.add_param(&p.advance);
+                page.add_param(&p.trigger_channel);
+                page.add_param(&p.latch);
+                page.add_param(&p.restart_on_chord);
+            });
+        });
+    }
 }
 
 nice_export_clap!(StairsArp);

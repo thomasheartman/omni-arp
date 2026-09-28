@@ -3,8 +3,8 @@
 A CLAP note-effect arpeggiator that builds patterns from a few knobs: a shape (straight, stairs,
 groups of three), a direction, where the walk starts, what it does at the edge, and an optional second
 walker or pedal note. Built on [nice-plug](https://codeberg.org/RustAudio/nice-plug) 0.4.2
-(pinned exactly in `Cargo.toml`). It has no GUI; every setting is a plain parameter, so Bitwig
-shows them as device parameters.
+(pinned exactly in `Cargo.toml`). It has no GUI; every setting is a plain parameter, and Bitwig
+shows them on three remote-control pages: Pattern, Notes and Input.
 
 ## Build
 
@@ -29,6 +29,7 @@ allocates.
 
 | Parameter        | Values                                                         | Default   |
 | ---------------- | -------------------------------------------------------------- | --------- |
+| **Pattern**      |                                                                |           |
 | Shape            | Straight (+1), Stairs (+2 -1), Groups of Three (+1 +1 -1), Repeat x2, Repeat x4 | Stairs |
 | Direction        | Up, Down                                                       | Up        |
 | Start            | Outside, Middle                                                | Outside   |
@@ -36,14 +37,17 @@ allocates.
 | Pair             | Off, Mirror, Low, High                                         | Off       |
 | Repeat Ends      | Reverse turnarounds play their step twice                      | Off       |
 | Length           | Full, or 1–32 steps before the pattern starts over             | Full      |
-| Notes            | 1, 2, 3, All: the pattern's note on top, plus the next held notes below it | 1 |
 | Rate             | 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32                              | 1/16      |
+| **Notes**        |                                                                |           |
+| Notes            | 1, 2, 3, All: the pattern's note on top, plus the next held notes below it | 1 |
+| Chord Velocity   | 1–100 %: velocity of the notes below the top one               | 80 %      |
 | Note Length      | 0–200 % of the step                                            | 100 %     |
 | Octaves Down     | 0–3                                                            | 0         |
 | Octaves Up       | 0–3                                                            | 0         |
 | Octave Behavior  | Thin, 1 by 1, Alt                                              | Thin      |
 | Velocity Mode    | As Played, Fixed, From Trigger                                 | As Played |
 | Fixed Velocity   | 1–127, used when Velocity Mode is Fixed                        | 100       |
+| **Input**        |                                                                |           |
 | Advance          | Tempo, Trigger                                                 | Tempo     |
 | Trigger Channel  | 1–16, the channel whose notes step the pattern in Trigger mode | 16        |
 | Latch            | Keep playing after the keys are released; the next chord replaces the old one | Off |
@@ -121,7 +125,8 @@ Going down, 1 by 1 and Alt take the octaves from the top.
 Each step can play more than the pattern's note. The pattern's note goes on top. Every other held
 note moves into its octave and then drops by octaves until it's below it, and the next highest
 of those fill in. With C E G held and Notes set to All, the steps play `C` over `E G` below it,
-then `E` over `G C`, then `G` over `C E`: the three inversions.
+then `E` over `G C`, then `G` over `C E`: the three inversions. Chord Velocity accents the top
+note by playing the others quieter, at 80 % of their usual velocity by default.
 
 ## Edge-case decisions
 
@@ -184,8 +189,7 @@ device should do that; not tried yet).
 
 - Built and tested on macOS arm64. The CLAP bundle passes
   [clap-validator](https://github.com/free-audio/clap-validator) 0.4.1 (36 passed, 0 failed; the
-  8 skipped tests cover audio ports and presets). Only the unit tests and the validator have
-  run it; it hasn't been confirmed in Bitwig yet.
+  8 skipped tests cover audio ports and presets), and runs in Bitwig on macOS.
 - The bundler signs ad hoc. That's fine for local use; sharing the plugin needs Developer ID
   signing and notarization. For Intel Macs, `cargo xtask bundle-universal omni-arp --release`
   should build a universal binary (needs `rustup target add x86_64-apple-darwin`; untested).

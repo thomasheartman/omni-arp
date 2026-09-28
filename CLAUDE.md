@@ -26,7 +26,8 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
   free-running, triggers), note endings (`Until`), the Notes voicing, Length, and the Repeat
   shapes (applied at playback, not in the pattern).
 - `src/lib.rs`: parameters, `Settings` from parameters, MIDI routing (trigger channel; every
-  note-off calls both `release` and `key_off`), and conversion to nice-plug events.
+  note-off calls both `release` and `key_off`), conversion to nice-plug events, and the CLAP
+  remote-control pages.
 
 ## Rules
 
@@ -45,6 +46,8 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
 - The pattern property tests run every knob combination (in range, covers every note, no note
   twice in a row). New shapes also get known cycles in `known_cycles`.
 - Parameter IDs identify settings in saved Bitwig projects. Don't rename them casually.
+- Every parameter sits on a remote-control page (`remote_controls` in `lib.rs`, eight per
+  page), and `ArpParams` lists fields in page order. New parameters go in both.
 
 ## Decisions
 
@@ -65,7 +68,5 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
 
 ## Open items
 
-- Not yet tested in Bitwig; the user started testing on 2026-09-28. The trigger routing (Note
-  Receiver plus a channel remap to the Trigger Channel) is unverified.
-- Planned: with Notes above 1, accent the pattern's top note by playing the other notes at
-  about 80 % of its velocity.
+- Runs in Bitwig on macOS, confirmed by the user on 2026-09-28. The trigger routing (Note
+  Receiver plus a channel remap to the Trigger Channel) hasn't been confirmed specifically.

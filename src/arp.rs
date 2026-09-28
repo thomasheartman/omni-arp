@@ -38,6 +38,8 @@ pub struct Settings {
     pub length: usize,
     /// Notes per step: the pattern's note on top, then the next held notes below it.
     pub notes: usize,
+    /// Velocity of the notes below the top one, as a fraction of what they'd otherwise play.
+    pub chord_velocity: f32,
     /// Note length as a fraction of the step, in `[0, 2]`.
     pub note_length: f64,
     pub velocity: Velocity,
@@ -279,7 +281,7 @@ impl Arp {
             key
         };
         let mut ceiling = top + 1;
-        for _ in 0..s.notes.min(n) {
+        for voice in 0..s.notes.min(n) {
             let Some((key, note)) = pool
                 .iter()
                 .map(|note| (voiced(note), note))
@@ -295,6 +297,12 @@ impl Arp {
                     Velocity::AsPlayed => note.velocity,
                     Velocity::Fixed(velocity) => velocity,
                     Velocity::FromTrigger => trigger_velocity.unwrap_or(note.velocity),
+                };
+                // The top note is the accent.
+                let velocity = if voice == 0 {
+                    velocity
+                } else {
+                    velocity * s.chord_velocity
                 };
                 let note = Note {
                     key: key as u8,
@@ -389,6 +397,7 @@ mod tests {
             octaves_up: 0,
             length: 0,
             notes: 1,
+            chord_velocity: 1.0,
             note_length: 0.5,
             velocity: Velocity::AsPlayed,
             triggered: false,
@@ -731,6 +740,25 @@ mod tests {
             chords(&events),
             [vec![60, 55], vec![64, 60], vec![67, 64], vec![72, 67]]
         );
+    }
+
+    #[test]
+    fn notes_below_the_top_play_at_chord_velocity() {
+        let s = Settings {
+            notes: usize::MAX,
+            chord_velocity: 0.5,
+            ..settings(Shape::Straight)
+        };
+        let mut arp = Arp::default();
+        hold(&mut arp, &[60, 64, 67]);
+        let velocities: Vec<(u8, f32)> = run(&mut arp, &s, 0, 1, true)
+            .into_iter()
+            .filter_map(|(_, o)| match o {
+                Out::On(n) => Some((n.key, n.velocity)),
+                Out::Off { .. } => None,
+            })
+            .collect();
+        assert_eq!(velocities, [(60, 0.8), (55, 0.4), (52, 0.4)]);
     }
 
     #[test]
