@@ -65,6 +65,9 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
 - Echo Below/Above repeat each lead step (the whole chord with Notes above 1) an octave away.
   A Pair with its own rate was considered and left out: two omni-arps in a Note FX Layer can
   fake it.
+- No added latency. With the transport stopped, the first step plays the instant the first key
+  goes down, even if the rest of a hand-played chord lands a few ms later. A chord window that
+  delays the first note was proposed and rejected.
 - Notes voicing ignores walker and direction: every step's own note goes on top. Flipping it for
   the mirrored walker (note at the bottom) is an option nobody has asked for yet.
 - Walks stop after the last whole group (pair, triple) that fits, so they end on the top note
