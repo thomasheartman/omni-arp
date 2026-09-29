@@ -20,11 +20,12 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
 ## Code map
 
 - `src/pattern.rs`: the pure generator. A `Spec` (the pattern knobs) plus note and octave counts
-  give one cycle of indices into the octave-stacked pool. Everything is generated going up and
-  mirrored for Down. Its only link to nice-plug is the `Enum` derives.
+  and a seed give one cycle of indices into the octave-stacked pool. Everything is generated
+  going up and mirrored for Down. Its only link to nice-plug is the `Enum` derives.
 - `src/arp.rs`: the engine, with no host dependencies. Pool and latch, step clock (tempo grid,
-  free-running, triggers), note endings (`Until`), the Notes voicing, Length, and the Repeat
-  shapes (applied at playback, not in the pattern).
+  free-running, triggers), note endings (`Until`), the Notes voicing, and everything applied at
+  playback rather than in the pattern: Repeats, Echo steps, Steps (`length`), and a fresh
+  Shuffle seed each cycle.
 - `src/lib.rs`: parameters, `Settings` from parameters, MIDI routing (trigger channel; every
   note-off calls both `release` and `key_off`), conversion to nice-plug events, and the CLAP
   remote-control pages.
@@ -48,21 +49,33 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
 - Parameter IDs identify settings in saved Bitwig projects. Don't rename them casually.
 - Every parameter sits on a remote-control page (`remote_controls` in `lib.rs`, eight per
   page), and `ArpParams` lists fields in page order. New parameters go in both.
+- Parameter names are at most eight characters, distinguishing word first ("Oct Down", not
+  "Octaves Down"). CLAP has no separate short name, and Bitwig cuts longer names off on its
+  remote controls. The README table gives each one's full meaning.
 
 ## Decisions
 
-- Patterns are knobs (Shape, Direction, Start, Edge, Pair) rather than a list of modes. Chord,
-  Random and As Played were dropped; other devices cover them.
+- Patterns are knobs (Shape, Dir, Start, Edge, Pair, First) rather than a list of modes. Chord
+  and As Played were dropped; other devices cover them. Random came back as Shape Shuffle: every
+  note once per cycle, a new order each cycle, never starting on the note that just played.
+- The two lines are the Lead and the Pair. First defaults to Lead, so Low and High play the walk
+  before the pedal note unless First is Pair. With Mirror, First duplicates Dir; that's accepted.
+- Repeat x2/x4 were shapes; now Repeats (1-32) applies to every step, Pair steps included.
+- Echo Below/Above repeat each lead step (the whole chord with Notes above 1) an octave away.
+  A Pair with its own rate was considered and left out: two omni-arps in a Note FX Layer can
+  fake it.
+- Notes voicing ignores walker and direction: every step's own note goes on top. Flipping it for
+  the mirrored walker (note at the bottom) is an option nobody has asked for yet.
 - Pair Mirror keeps each walker in its half of the range. An earlier rule, stopping the walkers
   before they cross, skipped notes with the zig-zag shapes.
 - Reverse drops a turnaround step (a note, or a round of both Mirror walkers) that would play
-  twice in a row, unless Repeat Ends is on.
-- Octave Behavior: Thin (default, the same as Bitwig's arp), 1 by 1 (Omnisphere's manual), Alt.
+  twice in a row, unless Ends x2 is on.
+- Oct Mode: Thin (default, the same as Bitwig's arp), 1 by 1 (Omnisphere's manual), Alt.
   Bitwig's Broad was left out.
-- Note Length above 100 % overlaps notes. A key that comes round while still on is ended first,
+- Gate above 100 % overlaps notes. A key that comes round while still on is ended first,
   since MIDI can't hold one key twice.
 - Trigger mode tells triggers apart by MIDI channel because nice-plug gives a plugin one note
-  input. Each trigger's note-off ends the notes it started, and with Velocity Mode As Played the
+  input. Each trigger's note-off ends the notes it started, and with Vel Mode As Played the
   trigger sets the velocity. (A separate From Trigger velocity mode was removed as redundant.)
 - Custom step patterns (arbitrary intervals) would need a GUI, so they're postponed. New shapes
   get added in code on request.

@@ -1,7 +1,8 @@
 //! The arpeggiator engine: note pool, step clock, and note output. It knows nothing about the
 //! plugin host; `lib.rs` feeds it key presses, trigger notes and a clock one sample at a time.
 
-use crate::pattern::{self, Spec};
+use crate::pattern::{self, First, Pair, Shape, Spec};
+use std::hash::{BuildHasher, RandomState};
 
 /// Octaves the range can reach below and above the held notes.
 pub const MAX_OCTAVE_SHIFT: usize = 3;
@@ -35,6 +36,8 @@ pub struct Settings {
     pub octaves_up: usize,
     /// Steps before the pattern starts over, or 0 to play whole cycles.
     pub length: usize,
+    /// Times each step plays, at least 1.
+    pub repeats: usize,
     /// Notes per step: the pattern's note on top, then the next held notes below it.
     pub notes: usize,
     /// Velocity of the notes below the top one, as a fraction of the top note's.
@@ -75,8 +78,11 @@ pub struct Arp {
     built: Option<(Spec, usize, usize)>,
     /// Position in `pattern` of the next step.
     pos: usize,
-    /// Times the step at `pos` has played, for the Repeat shapes.
-    repeat: usize,
+    /// Steps played from the pattern entry at `pos`: each plays `repeats` times, and twice that
+    /// with an echo.
+    sub: usize,
+    /// The pattern entry played last, so a new shuffle doesn't start on it.
+    last: Option<usize>,
     /// Steps played since the pattern started, for Length.
     played: usize,
     /// Whether the pool was non-empty on the previous tick.
@@ -89,6 +95,8 @@ pub struct Arp {
     /// Position of the free-running clock used while the transport is stopped.
     free_beat: f64,
     playing: bool,
+    /// Shuffle's xorshift state. Never zero.
+    rng: u64,
 }
 
 impl Default for Arp {
@@ -100,7 +108,8 @@ impl Default for Arp {
             pattern: Vec::with_capacity(pattern::max_len(MAX_KEYS * max_octaves)),
             built: None,
             pos: 0,
-            repeat: 0,
+            sub: 0,
+            last: None,
             played: 0,
             active: false,
             chord_changed: false,
@@ -108,6 +117,8 @@ impl Default for Arp {
             last_step: None,
             free_beat: 0.0,
             playing: false,
+            // Seeded per instance, so two arps shuffling don't play the same orders.
+            rng: RandomState::new().hash_one(0) | 1,
         }
     }
 }
@@ -248,27 +259,51 @@ impl Arp {
         emit: &mut impl FnMut(Out),
     ) {
         let octaves = s.octaves_down + 1 + s.octaves_up;
-        if self.built != Some((s.pattern, n, octaves)) {
-            pattern::fill(&mut self.pattern, &s.pattern, n, octaves);
-            self.built = Some((s.pattern, n, octaves));
-            // Continue from the same step if the new pattern is long enough, else its last step.
-            self.pos = self.pos.min(self.pattern.len() - 1);
-            self.repeat = 0;
-        }
         if s.length > 0 && self.played >= s.length {
             self.restart();
         }
+        let rebuild = self.built != Some((s.pattern, n, octaves));
+        let reshuffle = s.pattern.shape == Shape::Shuffle && self.pos == 0 && self.sub == 0;
+        if rebuild || reshuffle {
+            self.rng ^= self.rng << 13;
+            self.rng ^= self.rng >> 7;
+            self.rng ^= self.rng << 17;
+            pattern::fill(&mut self.pattern, &s.pattern, n, octaves, self.rng);
+            self.built = Some((s.pattern, n, octaves));
+            if rebuild {
+                // Continue from the same step if the new pattern is long enough, else its last.
+                self.pos = self.pos.min(self.pattern.len() - 1);
+                self.sub = 0;
+            }
+            if self.pattern.len() > 1 && Some(self.pattern[0]) == self.last {
+                self.pattern.swap(0, 1);
+            }
+        }
+
+        let echo = match s.pattern.pair {
+            Pair::EchoBelow => Some(-12),
+            Pair::EchoAbove => Some(12),
+            _ => None,
+        };
+        let parts = if echo.is_some() { 2 } else { 1 };
+        // The echo follows its step, or comes first with First: Pair.
+        let second_part = self.sub / s.repeats == 1;
+        let echo_shift = match echo {
+            Some(shift) if second_part != (s.pattern.first == First::Pair) => shift,
+            _ => 0,
+        };
         let i = self.pattern[self.pos];
+        self.last = Some(i);
         self.played += 1;
-        self.repeat += 1;
-        if self.repeat >= s.pattern.shape.repeats() {
-            self.repeat = 0;
+        self.sub += 1;
+        if self.sub >= parts * s.repeats {
+            self.sub = 0;
             self.pos = (self.pos + 1) % self.pattern.len();
         }
 
         let pool = if s.latch { &self.latched } else { &self.held };
         let lead = pool[i % n];
-        let shift = 12 * (i / n) as i32 - 12 * s.octaves_down as i32;
+        let shift = 12 * (i / n) as i32 - 12 * s.octaves_down as i32 + echo_shift;
         let top = lead.key as i32 + shift;
         // Each held note moves into the pattern note's octave, then down below it: the inversion
         // with the pattern's note on top.
@@ -314,7 +349,7 @@ impl Arp {
 
     fn restart(&mut self) {
         self.pos = 0;
-        self.repeat = 0;
+        self.sub = 0;
         self.played = 0;
     }
 
@@ -373,7 +408,7 @@ pub fn note_samples(fraction: f64, step_beats: f64, beats_per_sample: f64) -> u3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pattern::{Direction, Edge, OctaveBehavior, Pair, Shape, Start};
+    use crate::pattern::{Direction, Edge, OctaveBehavior, Start};
 
     /// 120 BPM at 48 kHz: a 1/16 step is 6000 samples.
     const BPS: f64 = 120.0 / 60.0 / 48_000.0;
@@ -387,6 +422,7 @@ mod tests {
                 start: Start::Outside,
                 edge: Edge::Restart,
                 pair: Pair::Off,
+                first: First::Lead,
                 repeat_ends: false,
                 octave_behavior: OctaveBehavior::Thin,
             },
@@ -394,6 +430,7 @@ mod tests {
             octaves_down: 0,
             octaves_up: 0,
             length: 0,
+            repeats: 1,
             notes: 1,
             chord_velocity: 1.0,
             note_length: 0.5,
@@ -616,7 +653,8 @@ mod tests {
     fn a_key_that_comes_round_while_still_on_ends_first() {
         let s = Settings {
             note_length: 2.0,
-            ..settings(Shape::RepeatX2)
+            repeats: 2,
+            ..settings(Shape::Straight)
         };
         let mut arp = Arp::default();
         hold(&mut arp, &[60]);
@@ -638,11 +676,75 @@ mod tests {
     }
 
     #[test]
-    fn repeat_shapes_play_each_step_several_times() {
+    fn repeats_play_each_step_several_times() {
+        let s = Settings {
+            repeats: 4,
+            ..settings(Shape::Straight)
+        };
         let mut arp = Arp::default();
         hold(&mut arp, &[60, 64]);
-        let events = run(&mut arp, &settings(Shape::RepeatX4), 0, 9 * STEP, true);
+        let events = run(&mut arp, &s, 0, 9 * STEP, true);
         assert_eq!(keys(&events), [60, 60, 60, 60, 64, 64, 64, 64, 60]);
+    }
+
+    #[test]
+    fn echoes_repeat_each_step_an_octave_away() {
+        let echo = |pair, first, repeats| {
+            let mut s = Settings {
+                repeats,
+                ..settings(Shape::Straight)
+            };
+            s.pattern.pair = pair;
+            s.pattern.first = first;
+            s
+        };
+        let play = |s: &Settings, steps| {
+            let mut arp = Arp::default();
+            hold(&mut arp, &[60, 64]);
+            keys(&run(&mut arp, s, 0, steps * STEP, true))
+        };
+        let s = echo(Pair::EchoBelow, First::Lead, 1);
+        assert_eq!(play(&s, 5), [60, 48, 64, 52, 60]);
+        // First: Pair puts the echo ahead of its note.
+        let s = echo(Pair::EchoAbove, First::Pair, 1);
+        assert_eq!(play(&s, 4), [72, 60, 76, 64]);
+        let s = echo(Pair::EchoBelow, First::Lead, 2);
+        assert_eq!(play(&s, 8), [60, 60, 48, 48, 64, 64, 52, 52]);
+
+        // With Notes above 1 the whole chord echoes.
+        let s = Settings {
+            notes: usize::MAX,
+            ..echo(Pair::EchoBelow, First::Lead, 1)
+        };
+        let mut arp = Arp::default();
+        hold(&mut arp, &[60, 64]);
+        let events = run(&mut arp, &s, 0, 2 * STEP, true);
+        assert_eq!(chords(&events), [vec![60, 52], vec![48, 40]]);
+    }
+
+    #[test]
+    fn shuffle_plays_every_note_once_per_cycle_in_new_orders() {
+        let mut arp = Arp::default();
+        hold(&mut arp, &[60, 62, 64, 65, 67]);
+        let played = keys(&run(
+            &mut arp,
+            &settings(Shape::Shuffle),
+            0,
+            40 * STEP,
+            true,
+        ));
+        for cycle in played.chunks(5) {
+            let mut sorted = cycle.to_vec();
+            sorted.sort();
+            assert_eq!(sorted, [60, 62, 64, 65, 67], "{played:?}");
+        }
+        // Includes the seams between cycles.
+        assert!(played.windows(2).all(|w| w[0] != w[1]), "{played:?}");
+        // Eight identical cycles in a row would be a (1/120)^7 fluke.
+        assert!(
+            played.chunks(5).any(|c| c != &played[..5]),
+            "the order never changes"
+        );
     }
 
     #[test]
@@ -1010,10 +1112,17 @@ mod tests {
             Shape::Straight,
             Shape::Stairs,
             Shape::GroupsOfThree,
-            Shape::RepeatX4,
+            Shape::Shuffle,
         ] {
             for edge in [Edge::Restart, Edge::Reverse, Edge::Wrap] {
-                for pair in [Pair::Off, Pair::Mirror, Pair::Low, Pair::High] {
+                for pair in [
+                    Pair::Off,
+                    Pair::Mirror,
+                    Pair::Low,
+                    Pair::High,
+                    Pair::EchoBelow,
+                    Pair::EchoAbove,
+                ] {
                     for (k, octave_behavior) in [
                         OctaveBehavior::Thin,
                         OctaveBehavior::OneByOne,
@@ -1026,6 +1135,7 @@ mod tests {
                             octaves_down: MAX_OCTAVE_SHIFT,
                             octaves_up: MAX_OCTAVE_SHIFT,
                             length: 5,
+                            repeats: 1 + k,
                             notes: [1, 3, usize::MAX][k],
                             note_length: 2.0,
                             latch: k == 1,
@@ -1036,6 +1146,7 @@ mod tests {
                             pair,
                             octave_behavior,
                             start: [Start::Outside, Start::Middle][k % 2],
+                            first: [First::Lead, First::Pair][k % 2],
                             repeat_ends: k == 2,
                             ..s.pattern
                         };

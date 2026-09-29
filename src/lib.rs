@@ -8,7 +8,7 @@ mod arp;
 mod pattern;
 
 use arp::{Arp, Note, Out, Settings, Velocity};
-use pattern::{Direction, Edge, OctaveBehavior, Pair, Shape, Spec, Start};
+use pattern::{Direction, Edge, First, OctaveBehavior, Pair, Shape, Spec, Start};
 
 pub struct StairsArp {
     params: Arc<ArpParams>,
@@ -83,7 +83,8 @@ enum Advance {
     Trigger,
 }
 
-/// In the order of the remote control pages: pattern, notes, input.
+/// In the order of the remote control pages: Pattern, Notes, More. Names stay within eight
+/// characters, which Bitwig shows on a remote control without cutting them off.
 #[derive(Params)]
 struct ArpParams {
     #[id = "shape"]
@@ -96,10 +97,10 @@ struct ArpParams {
     edge: EnumParam<Edge>,
     #[id = "pair"]
     pair: EnumParam<Pair>,
-    #[id = "repeat-ends"]
-    repeat_ends: BoolParam,
-    #[id = "length"]
-    length: IntParam,
+    #[id = "first"]
+    first: EnumParam<First>,
+    #[id = "repeats"]
+    repeats: IntParam,
     #[id = "rate"]
     rate: EnumParam<Rate>,
 
@@ -120,6 +121,10 @@ struct ArpParams {
     #[id = "velocity"]
     velocity: IntParam,
 
+    #[id = "length"]
+    length: IntParam,
+    #[id = "repeat-ends"]
+    repeat_ends: BoolParam,
     #[id = "advance"]
     advance: EnumParam<Advance>,
     #[id = "trigger-channel"]
@@ -144,12 +149,14 @@ impl Default for ArpParams {
         };
         Self {
             shape: EnumParam::new("Shape", Shape::Stairs),
-            direction: EnumParam::new("Direction", Direction::Up),
+            direction: EnumParam::new("Dir", Direction::Up),
             start: EnumParam::new("Start", Start::Outside),
             edge: EnumParam::new("Edge", Edge::Restart),
             pair: EnumParam::new("Pair", Pair::Off),
-            repeat_ends: BoolParam::new("Repeat Ends", false),
-            length: IntParam::new("Length", 0, IntRange::Linear { min: 0, max: 32 })
+            first: EnumParam::new("First", First::Lead),
+            repeats: IntParam::new("Repeats", 1, IntRange::Linear { min: 1, max: 32 }),
+            repeat_ends: BoolParam::new("Ends x2", false),
+            length: IntParam::new("Steps", 0, IntRange::Linear { min: 0, max: 32 })
                 .with_value_to_string(Arc::new(|steps| match steps {
                     0 => "Full".into(),
                     steps => steps.to_string(),
@@ -160,7 +167,7 @@ impl Default for ArpParams {
                 })),
             notes: EnumParam::new("Notes", Notes::One),
             chord_velocity: FloatParam::new(
-                "Chord Velocity",
+                "Chrd Vel",
                 0.8,
                 FloatRange::Linear {
                     min: 0.01,
@@ -171,27 +178,19 @@ impl Default for ArpParams {
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage()),
             rate: EnumParam::new("Rate", Rate::Sixteenth),
-            note_length: FloatParam::new(
-                "Note Length",
-                1.0,
-                FloatRange::Linear { min: 0.0, max: 2.0 },
-            )
-            .with_unit("%")
-            .with_value_to_string(formatters::v2s_f32_percentage(0))
-            .with_string_to_value(formatters::s2v_f32_percentage()),
-            octaves_down: octaves("Octaves Down"),
-            octaves_up: octaves("Octaves Up"),
-            octave_behavior: EnumParam::new("Octave Behavior", OctaveBehavior::Thin),
-            velocity_mode: EnumParam::new("Velocity Mode", VelocityMode::AsPlayed),
-            velocity: IntParam::new("Fixed Velocity", 100, IntRange::Linear { min: 1, max: 127 }),
+            note_length: FloatParam::new("Gate", 1.0, FloatRange::Linear { min: 0.0, max: 2.0 })
+                .with_unit("%")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            octaves_down: octaves("Oct Down"),
+            octaves_up: octaves("Oct Up"),
+            octave_behavior: EnumParam::new("Oct Mode", OctaveBehavior::Thin),
+            velocity_mode: EnumParam::new("Vel Mode", VelocityMode::AsPlayed),
+            velocity: IntParam::new("Velocity", 100, IntRange::Linear { min: 1, max: 127 }),
             advance: EnumParam::new("Advance", Advance::Tempo),
-            trigger_channel: IntParam::new(
-                "Trigger Channel",
-                16,
-                IntRange::Linear { min: 1, max: 16 },
-            ),
+            trigger_channel: IntParam::new("Trig Ch", 16, IntRange::Linear { min: 1, max: 16 }),
             latch: BoolParam::new("Latch", false),
-            restart_on_chord: BoolParam::new("Restart On Chord", false),
+            restart_on_chord: BoolParam::new("Retrig", false),
         }
     }
 }
@@ -215,6 +214,7 @@ impl StairsArp {
                 start: p.start.value(),
                 edge: p.edge.value(),
                 pair: p.pair.value(),
+                first: p.first.value(),
                 repeat_ends: p.repeat_ends.value(),
                 octave_behavior: p.octave_behavior.value(),
             },
@@ -222,6 +222,7 @@ impl StairsArp {
             octaves_down: p.octaves_down.value() as usize,
             octaves_up: p.octaves_up.value() as usize,
             length: p.length.value() as usize,
+            repeats: p.repeats.value() as usize,
             notes: match p.notes.value() {
                 Notes::One => 1,
                 Notes::Two => 2,
@@ -392,8 +393,8 @@ impl ClapPlugin for StairsArp {
                 page.add_param(&p.start);
                 page.add_param(&p.edge);
                 page.add_param(&p.pair);
-                page.add_param(&p.repeat_ends);
-                page.add_param(&p.length);
+                page.add_param(&p.first);
+                page.add_param(&p.repeats);
                 page.add_param(&p.rate);
             });
             section.add_page("Notes", |page| {
@@ -406,7 +407,9 @@ impl ClapPlugin for StairsArp {
                 page.add_param(&p.velocity_mode);
                 page.add_param(&p.velocity);
             });
-            section.add_page("Input", |page| {
+            section.add_page("More", |page| {
+                page.add_param(&p.length);
+                page.add_param(&p.repeat_ends);
                 page.add_param(&p.advance);
                 page.add_param(&p.trigger_channel);
                 page.add_param(&p.latch);
