@@ -84,8 +84,8 @@ pub struct Arp {
     /// Steps played from the pattern entry at `pos`: each plays `repeats` times, and twice that
     /// with an echo.
     sub: usize,
-    /// The pattern entry played last, so a new shuffle doesn't start on it.
-    last: Option<usize>,
+    /// The key of the lead note played last, so a new shuffle doesn't start on it.
+    last_key: Option<i32>,
     /// Steps played since the pattern started, for Length.
     played: usize,
     /// Whether the pool was non-empty on the previous tick.
@@ -113,7 +113,7 @@ impl Default for Arp {
             built: None,
             pos: 0,
             sub: 0,
-            last: None,
+            last_key: None,
             played: 0,
             active: false,
             chord_changed: false,
@@ -301,7 +301,10 @@ impl Arp {
                 self.pos = self.pos.min(self.pattern.len() - 1);
                 self.sub = 0;
             }
-            if self.pattern.len() > 1 && Some(self.pattern[0]) == self.last {
+            // A new shuffle doesn't start on the note that just played. Keys, not indices: the
+            // pool may have changed since.
+            let starts_on_last = self.last_key == Some(self.range[self.pattern[0]].0);
+            if s.pattern.shape == Shape::Shuffle && self.pattern.len() > 1 && starts_on_last {
                 self.pattern.swap(0, 1);
             }
         }
@@ -319,7 +322,7 @@ impl Arp {
             _ => 0,
         };
         let i = self.pattern[self.pos];
-        self.last = Some(i);
+        self.last_key = Some(self.range[i].0);
         self.played += 1;
         self.sub += 1;
         if self.sub >= parts * s.repeats {
@@ -978,6 +981,26 @@ mod tests {
         run(&mut arp, &s, 0, 1000, true);
         hold(&mut arp, &[60]);
         assert_eq!(ons(&run(&mut arp, &s, 1000, 2 * STEP, true)), [(STEP, 60)]);
+    }
+
+    #[test]
+    fn a_chord_played_by_hand_still_runs_the_pattern_from_the_bottom() {
+        // Transport stopped, keys a few ms apart with E first, as when playing a chord by hand.
+        let s = with_edge(Shape::GroupsOfThree, Edge::Reverse);
+        let mut arp = Arp::default();
+        let mut events = Vec::new();
+        let mut from = 0;
+        for (t, key) in [(0, 64), (150, 60), (300, 67), (450, 72)] {
+            events.extend(run(&mut arp, &s, from, t, false));
+            arp.key_on(note(key));
+            from = t;
+        }
+        events.extend(run(&mut arp, &s, from, 21 * STEP, false));
+        let played = keys(&events);
+        // E sounds alone on the key press; after that the full chord's cycle repeats unchanged.
+        let cycle = [60, 64, 67, 64, 67, 72, 67, 64, 67, 64];
+        assert_eq!(played[1..11], cycle, "{played:?}");
+        assert_eq!(played[11..21], cycle, "{played:?}");
     }
 
     #[test]
