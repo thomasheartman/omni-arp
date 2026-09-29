@@ -1,7 +1,7 @@
 //! The arpeggiator engine: note pool, step clock, and note output. It knows nothing about the
 //! plugin host; `lib.rs` feeds it key presses, trigger notes and a clock one sample at a time.
 
-use crate::pattern::{self, First, Pair, Shape, Spec};
+use crate::pattern::{self, First, OctaveBehavior, Pair, Shape, Spec};
 use std::hash::{BuildHasher, RandomState};
 
 /// Octaves the range can reach below and above the held notes.
@@ -73,8 +73,11 @@ pub struct Arp {
     held: Vec<Note>,
     /// Every key pressed since all keys were last up. This is the pool while latched.
     latched: Vec<Note>,
+    /// The keys the pattern's indices point at: the pool stacked over the octave range, each as
+    /// `(key, index into the pool)`.
+    range: Vec<(i32, usize)>,
     pattern: Vec<usize>,
-    /// The `(spec, n, octaves)` that `pattern` was built for.
+    /// The `(spec, notes, octaves)` that `pattern` was built for.
     built: Option<(Spec, usize, usize)>,
     /// Position in `pattern` of the next step.
     pos: usize,
@@ -105,6 +108,7 @@ impl Default for Arp {
         Self {
             held: Vec::with_capacity(MAX_KEYS),
             latched: Vec::with_capacity(MAX_KEYS),
+            range: Vec::with_capacity(MAX_KEYS * max_octaves),
             pattern: Vec::with_capacity(pattern::max_len(MAX_KEYS * max_octaves)),
             built: None,
             pos: 0,
@@ -259,17 +263,39 @@ impl Arp {
         emit: &mut impl FnMut(Out),
     ) {
         let octaves = s.octaves_down + 1 + s.octaves_up;
+        let thin = s.pattern.octave_behavior == OctaveBehavior::Thin;
+        let pool = if s.latch { &self.latched } else { &self.held };
+        self.range.clear();
+        for octave in 0..octaves {
+            let shift = 12 * (octave as i32 - s.octaves_down as i32);
+            for (k, note) in pool.iter().enumerate() {
+                let key = note.key as i32 + shift;
+                // Thin walks one line of notes, so when the chord's top note is its bottom note
+                // an octave up, the next copy's bottom note would repeat it. It plays once.
+                if !(thin && self.range.last().is_some_and(|&(last, _)| last == key)) {
+                    self.range.push((key, k));
+                }
+            }
+        }
+        // Thin walks the range as one line; the others walk the held notes and handle the
+        // octaves themselves.
+        let (notes, copies) = if thin {
+            (self.range.len(), 1)
+        } else {
+            (n, octaves)
+        };
+
         if s.length > 0 && self.played >= s.length {
             self.restart();
         }
-        let rebuild = self.built != Some((s.pattern, n, octaves));
+        let rebuild = self.built != Some((s.pattern, notes, copies));
         let reshuffle = s.pattern.shape == Shape::Shuffle && self.pos == 0 && self.sub == 0;
         if rebuild || reshuffle {
             self.rng ^= self.rng << 13;
             self.rng ^= self.rng >> 7;
             self.rng ^= self.rng << 17;
-            pattern::fill(&mut self.pattern, &s.pattern, n, octaves, self.rng);
-            self.built = Some((s.pattern, n, octaves));
+            pattern::fill(&mut self.pattern, &s.pattern, notes, copies, self.rng);
+            self.built = Some((s.pattern, notes, copies));
             if rebuild {
                 // Continue from the same step if the new pattern is long enough, else its last.
                 self.pos = self.pos.min(self.pattern.len() - 1);
@@ -302,9 +328,10 @@ impl Arp {
         }
 
         let pool = if s.latch { &self.latched } else { &self.held };
-        let lead = pool[i % n];
-        let shift = 12 * (i / n) as i32 - 12 * s.octaves_down as i32 + echo_shift;
-        let top = lead.key as i32 + shift;
+        let (key, k) = self.range[i];
+        let lead = pool[k];
+        let top = key + echo_shift;
+        let shift = top - lead.key as i32;
         // Each held note moves into the pattern note's octave, then down below it: the inversion
         // with the pattern's note on top.
         let voiced = |note: &Note| {
@@ -804,6 +831,49 @@ mod tests {
     }
 
     #[test]
+    fn octave_copies_never_repeat_a_note_back_to_back() {
+        let play = |shape, octave_behavior, held: &[u8], steps| {
+            let mut s = Settings {
+                octaves_up: 1,
+                ..settings(shape)
+            };
+            s.pattern.octave_behavior = octave_behavior;
+            let mut arp = Arp::default();
+            hold(&mut arp, held);
+            keys(&run(&mut arp, &s, 0, steps * STEP, true))
+        };
+        // C E G C': the next octave's C' is the chord's own top note, so it plays once.
+        assert_eq!(
+            play(Shape::Straight, OctaveBehavior::Thin, &[60, 64, 67, 72], 7),
+            [60, 64, 67, 72, 76, 79, 84]
+        );
+        assert_eq!(
+            play(
+                Shape::GroupsOfThree,
+                OctaveBehavior::Thin,
+                &[60, 64, 67, 72],
+                15
+            ),
+            [60, 64, 67, 64, 67, 72, 67, 72, 76, 72, 76, 79, 76, 79, 84]
+        );
+        // C E C' D': no neighbours repeat, so the copies stack as they are.
+        assert_eq!(
+            play(Shape::Straight, OctaveBehavior::Thin, &[60, 64, 72, 74], 8),
+            [60, 64, 72, 74, 72, 76, 84, 86]
+        );
+        // 1 by 1 plays whole copies of the chord, one octave after the other.
+        assert_eq!(
+            play(
+                Shape::Straight,
+                OctaveBehavior::OneByOne,
+                &[60, 64, 67, 72],
+                8
+            ),
+            [60, 64, 67, 72, 72, 76, 79, 84]
+        );
+    }
+
+    #[test]
     fn octaves_past_the_midi_range_are_rests() {
         let s = Settings {
             octaves_up: 1,
@@ -971,12 +1041,12 @@ mod tests {
     fn chord_changes_continue_from_the_clamped_step() {
         let s = settings(Shape::Stairs);
         let mut arp = Arp::default();
-        hold(&mut arp, &[60, 62, 64, 65, 67]); // m = 5: 0 2 1 3 2 4 3
-        let mut events = run(&mut arp, &s, 0, 6 * STEP, true); // plays 0 2 1 3 2 4
+        hold(&mut arp, &[60, 62, 64, 65, 67]); // m = 5: 0 2 1 3 2 4
+        let mut events = run(&mut arp, &s, 0, 5 * STEP, true); // plays 0 2 1 3 2
         arp.key_off(Some(65), None, false);
-        arp.key_off(Some(67), None, false); // m = 3: 0 2 1, step 6 clamps to 2
-        events.extend(run(&mut arp, &s, 6 * STEP, 8 * STEP, true));
-        assert_eq!(keys(&events), [60, 64, 62, 65, 64, 67, 62, 60]);
+        arp.key_off(Some(67), None, false); // m = 3: 0 2 1, step 5 clamps to 2
+        events.extend(run(&mut arp, &s, 5 * STEP, 7 * STEP, true));
+        assert_eq!(keys(&events), [60, 64, 62, 65, 64, 62, 60]);
     }
 
     #[test]

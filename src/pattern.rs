@@ -263,15 +263,31 @@ fn up(out: &mut Vec<usize>, spec: &Spec, paired: bool, m: usize) {
             out.extend(walk_up(chunk, 0, m));
             mirror(&mut out[seam..], m);
             drop_turnarounds(out, seam, (1, 1), (1, 1), spec.repeat_ends);
-            // Same loop, entered at the middle. Every chunk before it is whole.
-            out.rotate_left(from * chunk.len());
+            // Same loop, entered at the middle: where its chunk starts, or where the note first
+            // comes up if that chunk doesn't fit.
+            let entry = if from + chunk[chunk.len() - 1] < m {
+                from * chunk.len()
+            } else {
+                out.iter().position(|&i| i == from).unwrap_or(0)
+            };
+            out.rotate_left(entry);
         }
     }
 }
 
-/// Walks up from `from` a chunk at a time, stopping before the first note outside `0..m`.
+/// Walks up from `from` a chunk at a time and stops after the last chunk that fits in `0..m`, so
+/// the walk ends on the top note and a Reverse turns there. When whole chunks would play nothing
+/// or skip a note (Stairs over three notes: `0 2`), it ends with a partial chunk instead: `0 2 1`.
 fn walk_up(chunk: &[usize], from: usize, m: usize) -> impl Iterator<Item = usize> + '_ {
-    (from..m)
+    let reach = chunk[chunk.len() - 1];
+    let whole = m.saturating_sub(from).saturating_sub(reach);
+    let gaps = reach + 1 > chunk.len();
+    let bases = if whole == 0 || (gaps && whole == 1) {
+        m
+    } else {
+        from + whole
+    };
+    (from..bases)
         .flat_map(move |base| chunk.iter().map(move |k| base + k))
         .take_while(move |&i| i < m)
 }
@@ -507,22 +523,22 @@ mod tests {
             (
                 spec(Stairs, Up, Outside, Restart, Off),
                 5,
-                &[0, 2, 1, 3, 2, 4, 3],
+                &[0, 2, 1, 3, 2, 4],
             ),
             (
                 spec(Stairs, Down, Outside, Restart, Off),
                 5,
-                &[4, 2, 3, 1, 2, 0, 1],
+                &[4, 2, 3, 1, 2, 0],
             ),
             (
                 spec(Stairs, Up, Outside, Reverse, Off),
                 4,
-                &[0, 2, 1, 3, 2, 3, 1, 2, 0, 1],
+                &[0, 2, 1, 3, 1, 2],
             ),
             (
                 spec(Stairs, Down, Outside, Reverse, Off),
                 4,
-                &[3, 1, 2, 0, 1, 0, 2, 1, 3, 2],
+                &[3, 1, 2, 0, 2, 1],
             ),
             (
                 spec(Stairs, Up, Outside, Wrap, Off),
@@ -530,20 +546,28 @@ mod tests {
                 &[0, 2, 1, 3, 2, 4, 3, 0, 4, 1],
             ),
             (spec(Stairs, Up, Outside, Restart, Off), 2, &[0, 1]),
+            // Whole pairs would skip the middle of three notes, so the last pair stays partial.
+            (spec(Stairs, Up, Outside, Restart, Off), 3, &[0, 2, 1]),
+            // C E G C': whole groups turn on the top note and come back down to the bottom.
+            (
+                spec(GroupsOfThree, Up, Outside, Reverse, Off),
+                4,
+                &[0, 1, 2, 1, 2, 3, 2, 1, 2, 1],
+            ),
             (
                 spec(GroupsOfThree, Up, Outside, Restart, Off),
                 5,
-                &[0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4],
+                &[0, 1, 2, 1, 2, 3, 2, 3, 4],
             ),
             (
                 spec(GroupsOfThree, Down, Outside, Restart, Off),
                 5,
-                &[4, 3, 2, 3, 2, 1, 2, 1, 0, 1, 0],
+                &[4, 3, 2, 3, 2, 1, 2, 1, 0],
             ),
             (
                 spec(GroupsOfThree, Up, Outside, Reverse, Off),
                 3,
-                &[0, 1, 2, 1, 2, 1, 0, 1],
+                &[0, 1, 2, 1],
             ),
             // Join, Spread and their combinations, as in the manual's six-note examples.
             (
@@ -642,7 +666,7 @@ mod tests {
             (
                 spec(Stairs, Up, Outside, Restart, EchoBelow),
                 4,
-                &[0, 2, 1, 3, 2],
+                &[0, 2, 1, 3],
             ),
             (spec(Straight, Up, Outside, Restart, Low), 1, &[0]),
             // A single note just repeats.
@@ -759,9 +783,11 @@ mod tests {
             Edge::Restart,
             Pair::Off,
         );
-        for m in 3..=18 {
+        for m in 4..=18 {
             let p = pattern(&stairs, m, 1);
-            assert_eq!(p.len(), 2 * m - 3, "m={m}");
+            // Pairs up to the last one that fits, which ends on the top note.
+            assert_eq!(p.len(), 2 * m - 4, "m={m}");
+            assert_eq!(p[p.len() - 1], m - 1, "m={m}");
             for (k, &i) in p.iter().enumerate() {
                 let j = k / 2;
                 assert_eq!(i, if k % 2 == 0 { j } else { j + 2 }, "m={m} k={k}");

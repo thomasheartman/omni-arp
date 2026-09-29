@@ -22,8 +22,9 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
 - `src/pattern.rs`: the pure generator. A `Spec` (the pattern knobs) plus note and octave counts
   and a seed give one cycle of indices into the octave-stacked pool. Everything is generated
   going up and mirrored for Down. Its only link to nice-plug is the `Enum` derives.
-- `src/arp.rs`: the engine, with no host dependencies. Pool and latch, step clock (tempo grid,
-  free-running, triggers), note endings (`Until`), the Notes voicing, and everything applied at
+- `src/arp.rs`: the engine, with no host dependencies. Pool and latch, the key range the
+  pattern's indices point into (`range`), step clock (tempo grid, free-running, triggers), note
+  endings (`Until`), the Notes voicing, and everything applied at
   playback rather than in the pattern: Repeats, Echo steps, Steps (`length`), and a fresh
   Shuffle seed each cycle.
 - `src/lib.rs`: parameters, `Settings` from parameters, MIDI routing (trigger channel; every
@@ -66,6 +67,12 @@ aborts if `process()` allocates. Expect 36 passed, 8 skipped (audio ports and pr
   fake it.
 - Notes voicing ignores walker and direction: every step's own note goes on top. Flipping it for
   the mirrored walker (note at the bottom) is an option nobody has asked for yet.
+- Walks stop after the last whole group (pair, triple) that fits, so they end on the top note
+  and Reverse is symmetric. Exception: Stairs over exactly three notes keeps its partial pair
+  (`0 2 1`), since whole pairs would skip the middle note.
+- Oct Mode Thin drops a note from the stacked octave copies only where it would repeat the note
+  before it (C E G C' + an octave: `C E G C' E' G' C''`). No sorting, no other deduplication.
+  1 by 1 and Alt keep whole copies; with 1 by 1 you hear which octave you're in.
 - Pair Mirror keeps each walker in its half of the range. An earlier rule, stopping the walkers
   before they cross, skipped notes with the zig-zag shapes.
 - Reverse drops a turnaround step (a note, or a round of both Mirror walkers) that would play

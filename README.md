@@ -69,8 +69,9 @@ Straight Up                           1 2 3 4 5 6
 Straight Up, Edge Reverse             1 2 3 4 5 6 5 4 3 2
 Straight Up, Start Middle             4 5 6                    Restart plays one half
 Straight Up, Start Middle, Edge Wrap  4 5 6 1 2 3
-Stairs Up (5 notes)                   1 3 2 4 3 5 4
-Groups of Three (5 notes)             1 2 3 2 3 4 3 4 5 4 5
+Stairs Up (5 notes)                   1 3 2 4 3 5
+Groups of Three (5 notes)             1 2 3 2 3 4 3 4 5
+Groups of Three, Edge Reverse (4)     1 2 3 2 3 4 3 2 3 2      turns on the top note
 Shuffle (5 notes)                     3 1 5 2 4 | 2 5 1 4 3 | ...   a new order every cycle
 Pair Mirror                           1 6 2 5 3 4              Join
 Pair Mirror, Down, Start Middle       3 4 2 5 1 6              Spread
@@ -132,6 +133,11 @@ Alt       C C' E E' G G' E E'         each step in every octave before the next 
 
 Going down, 1 by 1 and Alt take the octaves from the top.
 
+When the chord's top note is its bottom note an octave up, like C E G C', Thin plays that note
+once where the octaves meet, so no note repeats back to back: `C E G C' E' G' C''`. Only
+back-to-back repeats go; C E C' D' stacks as `C E C' D' C' E' C'' D''`. 1 by 1 keeps whole copies
+of the chord, one octave after the other: `C E G C' | C' E' G' C''`.
+
 ### Notes
 
 Each step can play more than the pattern's note. The pattern's note goes on top. Every other held
@@ -144,15 +150,17 @@ puts its own note on top. An echo repeats the whole chord an octave away.
 
 ## Edge-case decisions
 
-- **Overshoot ends the pass.** A walk stops before the first note that would leave the range,
-  then follows the Edge setting. It never clamps or skips. The top note is still reached.
+- **Whole groups.** A walk stops after the last group that fits (a Stairs pair, a Groups of
+  Three triple), so it ends on the top note and Reverse turns there, then comes back down to
+  the bottom note. It never clamps. The one exception is where whole groups would skip a note or
+  play nothing: Stairs over exactly three notes ends with its partial pair, `1 3 2`.
 - **Fewer than 3 notes.** Stairs and Groups of Three need three notes to take their steps, and
   walk straight over fewer. A single note just repeats, and so does a Middle + Restart half of
   two.
 - **Turnarounds.** When Reverse would play a step twice in a row where the walk turns, or where
   the cycle loops, the step plays once. Ends x2 keeps both. A step is a note, or with Pair
   Mirror a round of both walkers, so Join/Spread plays the middle and outer pairs once per
-  cycle. Stairs and Groups of Three never turn on the same note.
+  cycle.
 - **Shuffle** ignores Start and Edge. A new cycle never starts on the note that ended the last
   one. With Mirror, the lower half (with the middle note, if any) and the upper half are
   shuffled separately and alternate; with Low or High, the pedal note stays put. Each plugin
